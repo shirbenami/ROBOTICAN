@@ -92,6 +92,39 @@ class TurnRightAgent(Node):
             f"[{self.rooster_id}] Armed: {self.yaw_ctrl.is_armed}, Airborne: {self.yaw_ctrl.is_airborne}")
         return self.yaw_ctrl.is_armed
 
+    def _disarm(self):
+        """Disarm the drone."""
+        self.get_logger().info(f"[{self.rooster_id}] Disarming...")
+
+        # Stop all movement first
+        self.yaw_ctrl.current_x = 0.0
+        self.yaw_ctrl.current_y = 0.0
+        self.yaw_ctrl.current_z = 0.0
+        self.yaw_ctrl.current_r = 0.0
+        time.sleep(0.1)
+
+        if not self.yaw_ctrl.force_arm_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().error("force_arm service not available for disarm!")
+            return False
+
+        req = SetBool.Request()
+        req.data = False
+        future = self.yaw_ctrl.force_arm_client.call_async(req)
+
+        start = time.time()
+        while not future.done() and time.time() - start < 2.0:
+            time.sleep(0.05)
+
+        if future.done():
+            try:
+                result = future.result()
+                self.get_logger().info(f"[{self.rooster_id}] Disarm result: {result.message}")
+                return result.success
+            except Exception as e:
+                self.get_logger().error(f"Disarm exception: {e}")
+                return False
+        return False
+
     def handle_request(self, request, response):
         self.get_logger().info(f"[{self.rooster_id}] Executing 90° right turn...")
 
@@ -103,6 +136,9 @@ class TurnRightAgent(Node):
 
         # Perform rotation
         success = self.yaw_ctrl.rotate(90, hover_throttle=self.yaw_ctrl.current_z)
+
+        # Disarm after rotation
+        self._disarm()
 
         response.success = success
         response.message = "Turn right complete" if success else "Turn failed"
