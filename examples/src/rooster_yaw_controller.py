@@ -36,7 +36,7 @@ class YawController(Node):
     Simplified 2-step yaw controller using impulse-based control.
     """
 
-    def __init__(self, rooster_id: str = "R1", name: str = "yaw_controller"):
+    def __init__(self, rooster_id: str = "R2", name: str = "yaw_controller"):
         super().__init__(name)
 
         self.rooster_id = rooster_id

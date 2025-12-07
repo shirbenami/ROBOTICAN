@@ -110,7 +110,7 @@ class VideoExample(Node):
         req.camera_id = 0
         req.playing = True
         req.port = 5001
-        req.host = "192.168.131.5"   # host IP
+        req.host = "192.168.131.20"   # host IP
         HIGH_RESO = 640
         req.resolution_width = HIGH_RESO
         req.resolution_height = int(HIGH_RESO * 9 / 16)

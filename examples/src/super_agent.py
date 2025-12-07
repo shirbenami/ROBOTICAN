@@ -32,7 +32,7 @@ from rooster_yaw_controller import YawController
 
 
 class TurnSuperAgent(Node):
-    def __init__(self, rooster_id: str = "R1", hover_throttle: float = 200.0):
+    def __init__(self, rooster_id: str = "R2", hover_throttle: float = 200.0):
         super().__init__(f"turn_super_agent_{rooster_id}")
 
         self.rooster_id = rooster_id
@@ -328,8 +328,8 @@ def main():
     import os
 
     parser = argparse.ArgumentParser(description="Turn Super Agent - Interactive")
-    parser.add_argument("--rooster", "-r", type=str, default="R1",
-                        help="Rooster ID (R1, R2, or R3)")
+    parser.add_argument("--rooster", "-r", type=str, default="R2",
+                        help="Rooster ID (R2, R2, or R3)")
     parser.add_argument("--throttle", "-t", type=float, default=200.0,
                         help="Hover throttle (z value, range -1000 to 1000)")
     args = parser.parse_args()

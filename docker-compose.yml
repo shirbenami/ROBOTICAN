@@ -9,9 +9,10 @@ x-common-settings: &compose-base
     - QT_X11_NO_MITSHM=1
     - QT_QPA_PLATFORM=xcb
     - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-    - ROS_DOMAIN_ID=5
+    - ROS_DOMAIN_ID=2
     - GID=125
     - CYCLONEDDS_URI=file:///etc/cyclonedds.xml
+
 
 services:
   build_ws:
