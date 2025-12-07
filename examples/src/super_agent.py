@@ -315,7 +315,8 @@ def interactive_menu(node: TurnSuperAgent, shutdown_event: threading.Event):
             else:
                 print(f"✗ Invalid choice: '{choice}'. Please enter 1, 2, or 3.")
 
-        except EOFError:
+        except (EOFError, KeyboardInterrupt):
+            # Exit the loop on CTRL+C or EOF
             break
         except Exception as e:
             if not shutdown_event.is_set():
@@ -324,6 +325,7 @@ def interactive_menu(node: TurnSuperAgent, shutdown_event: threading.Event):
 
 def main():
     import argparse
+    import os
 
     parser = argparse.ArgumentParser(description="Turn Super Agent - Interactive")
     parser.add_argument("--rooster", "-r", type=str, default="R1",
@@ -342,11 +344,21 @@ def main():
 
     # Setup signal handlers for graceful shutdown
     shutdown_event = threading.Event()
+    shutdown_started = [False]  # Use list to allow modification in nested function
 
     def signal_handler(signum, frame):
+        if shutdown_started[0]:
+            # Already shutting down, force exit
+            print("\nForce exit...")
+            os._exit(1)
+
+        shutdown_started[0] = True
         print(f"\n\n[CTRL+C] Emergency stop initiated...")
         node.shutdown()
         shutdown_event.set()
+
+        # Restore default handler for next CTRL+C to force exit
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -358,15 +370,15 @@ def main():
     # Run interactive menu in main thread
     try:
         interactive_menu(node, shutdown_event)
-    except KeyboardInterrupt:
-        # Backup handler
-        print("\n\n[CTRL+C] Emergency stop initiated...")
-        node.shutdown()
-        shutdown_event.set()
+    except (KeyboardInterrupt, EOFError):
+        if not shutdown_started[0]:
+            print("\n\n[CTRL+C] Emergency stop initiated...")
+            node.shutdown()
+            shutdown_event.set()
 
     # Cleanup
     print("\nCleaning up...")
-    time.sleep(0.5)
+    time.sleep(0.3)
 
     try:
         node.destroy_node()
