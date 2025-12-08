@@ -28,7 +28,7 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallb
 
 from std_srvs.srv import Trigger, SetBool
 
-from rooster_yaw_controller import YawController
+from controller.rooster_yaw_controller import YawController
 
 
 class TurnSuperAgent(Node):

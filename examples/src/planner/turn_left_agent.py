@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Turn Right Agent
+Turn Left Agent
 ---------------------------------
-Rotates drone 90° clockwise.
-Service: /{rooster_id}/turn_right
+Rotates drone 90° counterclockwise.
+Service: /{rooster_id}/turn_left
 
 Automatically arms the drone if not armed.
 """
@@ -16,12 +16,12 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 
 from std_srvs.srv import Trigger, SetBool
 
-from rooster_yaw_controller import YawController
+from controller.rooster_yaw_controller import YawController
 
 
-class TurnRightAgent(Node):
+class TurnLeftAgent(Node):
     def __init__(self, rooster_id: str = "R2", hover_throttle: float = 200.0):
-        super().__init__(f"turn_right_agent_{rooster_id}")
+        super().__init__(f"turn_left_agent_{rooster_id}")
 
         self.rooster_id = rooster_id
         self.hover_throttle = hover_throttle
@@ -29,11 +29,11 @@ class TurnRightAgent(Node):
         # Create yaw controller for this drone
         self.yaw_ctrl = YawController(
             rooster_id=rooster_id,
-            name=f"turn_right_yaw_{rooster_id}"
+            name=f"turn_left_yaw_{rooster_id}"
         )
 
         # Create service
-        service_name = f"/{rooster_id}/turn_right"
+        service_name = f"/{rooster_id}/turn_left"
         self.srv = self.create_service(
             Trigger,
             service_name,
@@ -41,7 +41,7 @@ class TurnRightAgent(Node):
             callback_group=MutuallyExclusiveCallbackGroup()
         )
 
-        self.get_logger().info(f"TurnRightAgent ready for {rooster_id} (90° clockwise)")
+        self.get_logger().info(f"TurnLeftAgent ready for {rooster_id} (90° counterclockwise)")
 
     def ensure_armed_and_airborne(self) -> bool:
         """Ensure the drone is armed and airborne. Returns True if ready."""
@@ -118,15 +118,13 @@ class TurnRightAgent(Node):
         if future.done():
             try:
                 result = future.result()
-                self.get_logger().info(f"[{self.rooster_id}] Disarm result: {result.message}")
-                return result.success
+                self.get_logger().info(f"[{self.rooster_id}] Disarm: {result.message}")
             except Exception as e:
                 self.get_logger().error(f"Disarm exception: {e}")
-                return False
-        return False
+        return True
 
     def handle_request(self, request, response):
-        self.get_logger().info(f"[{self.rooster_id}] Executing 90° right turn...")
+        self.get_logger().info(f"[{self.rooster_id}] Executing 90° left turn...")
 
         # Ensure drone is armed and airborne
         if not self.ensure_armed_and_airborne():
@@ -135,13 +133,13 @@ class TurnRightAgent(Node):
             return response
 
         # Perform rotation
-        success = self.yaw_ctrl.rotate(90, hover_throttle=self.yaw_ctrl.current_z)
+        success = self.yaw_ctrl.rotate(-90, hover_throttle=self.yaw_ctrl.current_z)
 
         # Disarm after rotation
         self._disarm()
 
         response.success = success
-        response.message = "Turn right complete" if success else "Turn failed"
+        response.message = "Turn left complete" if success else "Turn failed"
 
         return response
 
@@ -149,7 +147,7 @@ class TurnRightAgent(Node):
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Turn Right Agent")
+    parser = argparse.ArgumentParser(description="Turn Left Agent")
     parser.add_argument("--rooster", "-r", type=str, default="R2",
                         help="Rooster ID (R2, R2, or R3)")
     parser.add_argument("--throttle", "-t", type=float, default=200.0,
@@ -158,7 +156,7 @@ def main():
 
     rclpy.init()
 
-    node = TurnRightAgent(rooster_id=args.rooster, hover_throttle=args.throttle)
+    node = TurnLeftAgent(rooster_id=args.rooster, hover_throttle=args.throttle)
 
     executor = MultiThreadedExecutor(num_threads=2)
     executor.add_node(node)
