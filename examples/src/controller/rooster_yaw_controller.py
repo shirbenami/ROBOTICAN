@@ -2,8 +2,8 @@
 """
 Two-Phase Continuous Yaw Controller
 ------------------------------------
-Phase 1: Fast rotation (600 force) until close to target
-Phase 2: Slow rotation (300 force) to precisely reach target
+Phase 1: Fast rotation (300 force) until close to target
+Phase 2: Slow rotation (200 force) to precisely reach target
 """
 
 import math
@@ -54,11 +54,11 @@ class YawController(Node):
         self.flight_mode = 1
 
         # Phase 1: Fast
-        self.fast_force = 600.0
+        self.fast_force = 300.0
         self.fast_threshold = math.radians(15.0)  # Switch to slow when within 15°
 
         # Phase 2: Slow
-        self.slow_force = 300.0
+        self.slow_force = 200.0
         self.slow_threshold = math.radians(2.0)   # Stop when within 2° and coast
 
         # Completion

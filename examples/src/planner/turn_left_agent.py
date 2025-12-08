@@ -2,7 +2,7 @@
 """
 Turn Left Agent
 ---------------------------------
-Rotates drone 90° counterclockwise.
+Rotates drone 45° counterclockwise.
 Service: /{rooster_id}/turn_left
 
 Automatically arms the drone if not armed.
@@ -41,7 +41,7 @@ class TurnLeftAgent(Node):
             callback_group=MutuallyExclusiveCallbackGroup()
         )
 
-        self.get_logger().info(f"TurnLeftAgent ready for {rooster_id} (90° counterclockwise)")
+        self.get_logger().info(f"TurnLeftAgent ready for {rooster_id} (45° counterclockwise)")
 
     def ensure_armed_and_airborne(self) -> bool:
         """Ensure the drone is armed and airborne. Returns True if ready."""
@@ -124,7 +124,7 @@ class TurnLeftAgent(Node):
         return True
 
     def handle_request(self, request, response):
-        self.get_logger().info(f"[{self.rooster_id}] Executing 90° left turn...")
+        self.get_logger().info(f"[{self.rooster_id}] Executing 45° left turn...")
 
         # Ensure drone is armed and airborne
         if not self.ensure_armed_and_airborne():
@@ -133,7 +133,7 @@ class TurnLeftAgent(Node):
             return response
 
         # Perform rotation
-        success = self.yaw_ctrl.rotate(-90, hover_throttle=self.yaw_ctrl.current_z)
+        success = self.yaw_ctrl.rotate(-45, hover_throttle=self.yaw_ctrl.current_z)
 
         # Disarm after rotation
         self._disarm()

@@ -6,13 +6,13 @@ Orchestrates turn left/right operations for a drone with interactive menu.
 Handles graceful shutdown with immediate stop and disarm on CTRL+C.
 
 Interactive Menu:
-  1. Rotate right (90° CW)
-  2. Rotate left (90° CCW)
+  1. Rotate right (45° CW)
+  2. Rotate left (45° CCW)
   3. Stop all & disarm
 
 Services (also available):
-  /{rooster_id}/turn_right  - Rotate 90° clockwise
-  /{rooster_id}/turn_left   - Rotate 90° counterclockwise
+  /{rooster_id}/turn_right  - Rotate 45° clockwise
+  /{rooster_id}/turn_left   - Rotate 45° counterclockwise
   /{rooster_id}/stop        - Emergency stop and disarm
 """
 
@@ -99,19 +99,28 @@ class TurnSuperAgent(Node):
 
     def ensure_armed_and_airborne(self) -> bool:
         """Ensure the drone is armed and airborne. Returns True if ready."""
-        # Check if already armed
-        if not self.yaw_ctrl.is_armed:
-            self.get_logger().info(f"[{self.rooster_id}] Drone not armed, arming...")
 
-            if not self.yaw_ctrl.force_arm_client.wait_for_service(timeout_sec=2.0):
-                self.get_logger().error("force_arm service not available!")
-                return False
+        if not self.yaw_ctrl.force_arm_client.wait_for_service(timeout_sec=2.0):
+            self.get_logger().error("force_arm service not available!")
+            return False
+
+        # STEP 1: Ensure throttle is at ZERO before arming (required by most FCUs)
+        self.get_logger().info(f"[{self.rooster_id}] Setting throttle to zero before arming...")
+        self.yaw_ctrl.current_x = 0.0
+        self.yaw_ctrl.current_y = 0.0
+        self.yaw_ctrl.current_z = 0.0
+        self.yaw_ctrl.current_r = 0.0
+        time.sleep(0.2)  # Let zero-throttle command propagate
+
+        # STEP 2: Arm the drone
+        if not self.yaw_ctrl.is_armed:
+            self.get_logger().info(f"[{self.rooster_id}] Arming drone...")
 
             req = SetBool.Request()
             req.data = True
             future = self.yaw_ctrl.force_arm_client.call_async(req)
 
-            # Wait for arm response
+            # Wait for arm service response
             start = time.time()
             while not future.done() and time.time() - start < 3.0:
                 time.sleep(0.05)
@@ -119,31 +128,56 @@ class TurnSuperAgent(Node):
             if future.done():
                 try:
                     result = future.result()
-                    self.get_logger().info(f"Arm result: {result.message}")
+                    self.get_logger().info(f"Arm service result: {result.message}")
                 except Exception as e:
                     self.get_logger().error(f"Arm exception: {e}")
                     return False
 
-            # Wait for arming to take effect
-            time.sleep(1.0)
-
-        # Apply throttle to get airborne
-        if not self.yaw_ctrl.is_airborne:
-            self.get_logger().info(f"[{self.rooster_id}] Applying throttle to get airborne...")
-            self.yaw_ctrl.current_z = self.hover_throttle
-
-            # Wait to become airborne
+            # STEP 3: Wait for armed STATE to be confirmed (not just service response)
+            self.get_logger().info(f"[{self.rooster_id}] Waiting for armed state confirmation...")
             start = time.time()
-            while not self.yaw_ctrl.is_airborne and time.time() - start < 5.0:
+            while not self.yaw_ctrl.is_armed and time.time() - start < 2.0:
+                time.sleep(0.05)
+
+            if not self.yaw_ctrl.is_armed:
+                self.get_logger().error(f"[{self.rooster_id}] Failed to confirm armed state!")
+                return False
+
+            self.get_logger().info(f"[{self.rooster_id}] Armed state confirmed!")
+
+        # STEP 4: NOW apply throttle (after armed state is confirmed)
+        self.get_logger().info(f"[{self.rooster_id}] Applying throttle: {self.hover_throttle}")
+        self.yaw_ctrl.current_z = self.hover_throttle
+
+        # STEP 5: Wait to become airborne
+        self.get_logger().info(f"[{self.rooster_id}] Waiting to become airborne...")
+        start = time.time()
+        while not self.yaw_ctrl.is_airborne and time.time() - start < 5.0:
+            # Check if we lost armed status
+            if not self.yaw_ctrl.is_armed:
+                self.get_logger().warn(f"[{self.rooster_id}] Lost armed status! Throttle may be too low.")
+                # Try to re-arm while keeping throttle
+                req = SetBool.Request()
+                req.data = True
+                self.yaw_ctrl.force_arm_client.call_async(req)
+                time.sleep(0.2)
+            time.sleep(0.1)
+
+        if not self.yaw_ctrl.is_airborne:
+            self.get_logger().warn(f"[{self.rooster_id}] Not airborne yet, trying higher throttle (400)...")
+            self.yaw_ctrl.current_z = 400.0
+
+            start = time.time()
+            while not self.yaw_ctrl.is_airborne and time.time() - start < 3.0:
+                if not self.yaw_ctrl.is_armed:
+                    req = SetBool.Request()
+                    req.data = True
+                    self.yaw_ctrl.force_arm_client.call_async(req)
+                    time.sleep(0.2)
                 time.sleep(0.1)
 
-            if not self.yaw_ctrl.is_airborne:
-                self.get_logger().warn("Failed to become airborne, trying higher throttle...")
-                self.yaw_ctrl.current_z = 400.0
-                time.sleep(2.0)
-
         self.get_logger().info(
-            f"[{self.rooster_id}] Armed: {self.yaw_ctrl.is_armed}, Airborne: {self.yaw_ctrl.is_airborne}")
+            f"[{self.rooster_id}] Final status - Armed: {self.yaw_ctrl.is_armed}, Airborne: {self.yaw_ctrl.is_airborne}")
         return self.yaw_ctrl.is_armed
 
     def execute_turn_right(self) -> tuple:
@@ -156,13 +190,13 @@ class TurnSuperAgent(Node):
             self._operation_in_progress = True
 
         try:
-            self.get_logger().info(f"[{self.rooster_id}] Executing 90° RIGHT turn...")
+            self.get_logger().info(f"[{self.rooster_id}] Executing 45° RIGHT turn...")
 
             # Ensure drone is armed and airborne
             if not self.ensure_armed_and_airborne():
                 return False, "Failed to arm drone"
 
-            success = self.yaw_ctrl.rotate(90, hover_throttle=self.yaw_ctrl.current_z)
+            success = self.yaw_ctrl.rotate(45, hover_throttle=self.yaw_ctrl.current_z)
             message = "Turn right complete" if success else "Turn right failed"
             return success, message
         except Exception as e:
@@ -181,13 +215,13 @@ class TurnSuperAgent(Node):
             self._operation_in_progress = True
 
         try:
-            self.get_logger().info(f"[{self.rooster_id}] Executing 90° LEFT turn...")
+            self.get_logger().info(f"[{self.rooster_id}] Executing 45° LEFT turn...")
 
             # Ensure drone is armed and airborne
             if not self.ensure_armed_and_airborne():
                 return False, "Failed to arm drone"
 
-            success = self.yaw_ctrl.rotate(-90, hover_throttle=self.yaw_ctrl.current_z)
+            success = self.yaw_ctrl.rotate(-45, hover_throttle=self.yaw_ctrl.current_z)
             message = "Turn left complete" if success else "Turn left failed"
             return success, message
         except Exception as e:
@@ -259,8 +293,8 @@ def print_menu(rooster_id: str):
     print("\n" + "=" * 50)
     print(f"  DRONE CONTROL - {rooster_id}")
     print("=" * 50)
-    print("  1. Rotate RIGHT (90° clockwise)")
-    print("  2. Rotate LEFT  (90° counterclockwise)")
+    print("  1. Rotate RIGHT (45° clockwise)")
+    print("  2. Rotate LEFT  (45° counterclockwise)")
     print("  3. STOP ALL & Disarm")
     print("-" * 50)
     print("  Press CTRL+C for emergency stop")
@@ -330,7 +364,7 @@ def main():
     parser = argparse.ArgumentParser(description="Turn Super Agent - Interactive")
     parser.add_argument("--rooster", "-r", type=str, default="R2",
                         help="Rooster ID (R2, R2, or R3)")
-    parser.add_argument("--throttle", "-t", type=float, default=200.0,
+    parser.add_argument("--throttle", "-t", type=float, default=250.0,
                         help="Hover throttle (z value, range -1000 to 1000)")
     args = parser.parse_args()
 
