@@ -32,7 +32,7 @@ def to_360(rad: float) -> float:
 
 
 class YawController(Node):
-    def __init__(self, rooster_id: str = "R2", name: str = "yaw_controller"):
+    def __init__(self, rooster_id: str = "R1", name: str = "yaw_controller"):
         super().__init__(name)
         self.rooster_id = rooster_id
 
@@ -179,6 +179,7 @@ class YawController(Node):
                     self.get_logger().info(
                         f"[END] pos=({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}) angle={to_360(self.yaw):.1f}°"
                     )
+                    self.get_capture()
                     self.get_logger().info(f"✓ Done! Rotated {actual:.1f}° (error: {final_err:.2f}°)")
                     return True
             else:
@@ -218,6 +219,7 @@ class YawController(Node):
         self.get_logger().info(
             f"[END] pos=({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}) angle={to_360(self.yaw):.1f}°"
         )
+        self.get_capture()
         self.get_logger().warn(f"Timeout! Final error: {final_err:.2f}°")
         return False
 
@@ -225,3 +227,6 @@ class YawController(Node):
         """Stop all movement."""
         self.current_x = self.current_y = self.current_z = self.current_r = 0.0
         time.sleep(0.05)
+
+    def get_capture(self):
+        print("here")

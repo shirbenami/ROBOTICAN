@@ -36,7 +36,7 @@ class AltitudeConfig:
     """Configuration parameters for the altitude controller."""
 
     # Drone identification
-    rooster_id: str = "R2"
+    rooster_id: str = "R1"
 
     # Target altitude
     target_height: float = 1.0  # meters
@@ -513,7 +513,7 @@ def parse_args() -> AltitudeConfig:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s -r R2 --height 1.0
+  %(prog)s -r R1 --height 1.0
   %(prog)s --hover-throttle 520 --takeoff-throttle 620
   %(prog)s --kp 200 --ki 10 --kd 60
   %(prog)s --descent-rate 0.15 --landing-throttle 380
@@ -524,8 +524,8 @@ Examples:
     parser.add_argument(
         "-r", "--rooster-id",
         type=str,
-        default="R2",
-        help="Drone ID (default: R2)"
+        default="R1",
+        help="Drone ID (default: R1)"
     )
 
     # Target altitude
