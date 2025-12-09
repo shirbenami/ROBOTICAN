@@ -13,7 +13,7 @@ from builtin_interfaces.msg import Time
 import numpy as np
 import cv2
 from cv_bridge import CvBridge
-
+import copy
 import math
 from typing import Iterable, Optional
 
@@ -62,6 +62,10 @@ class VideoStreamExample(Node):
                                                      f"/{self.id}/camera/camera_info", 10)
 
         self.camera_info_template = None
+        self.camera_info_pub = self.create_publisher(
+            CameraInfo, f"/{self.id}/camera/camera_info", 10
+        )
+
 
         # ---- GStreamer pipeline with appsink ----
         gst_pipeline = (
@@ -71,6 +75,7 @@ class VideoStreamExample(Node):
             "rtph264depay ! "
             "decodebin ! "
             "videoconvert ! "
+            "videocrop name=cropper top=50 left=50 right=50 bottom=50 ! "
             "video/x-raw,format=BGR ! "
             "appsink name=mysink emit-signals=true sync=false max-buffers=1 drop=true"
         )
@@ -217,10 +222,13 @@ class VideoStreamExample(Node):
         """
         h, w, _ = frame.shape
         self.i += 1
-
+        
         # Build CameraInfo template once, when we see the first frame
         if self.camera_info_template is None:
-            self.camera_info_template = self.make_camera_info()
+            # Use the camera frame id you actually publish on images
+            self.camera_info_template = self.make_camera_info(
+                frame_id=f"{self.id}_camera"
+            )
         # occasional debug
         if self.i % 500 == 1:
             self.get_logger().info(f"Frame #{self.i}: {w}x{h}")
@@ -234,10 +242,12 @@ class VideoStreamExample(Node):
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = f"{self.id}_camera"
 
-        ci = CameraInfo()
-        ci.__dict__.update(self.camera_info_template.__dict__)
+        ci = copy.deepcopy(self.camera_info_template)
+        # Update header + size (in case the actual frame size differs)
         ci.header.stamp = msg.header.stamp
         ci.header.frame_id = msg.header.frame_id
+        ci.width = w
+        ci.height = h
 
 
         self.image_pub.publish(msg)
@@ -337,7 +347,7 @@ class VideoStreamExample(Node):
 def main(args=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--drone-id", default="R2", help="Drone ID (R1/R2/R3...)")
-    parser.add_argument("--host-ip", default="192.168.131.20", help="Host IP for UDP video sink")
+    parser.add_argument("--host-ip", default="192.168.131.24", help="Host IP for UDP video sink")
     parser.add_argument("--port", type=int, default=5001, help="UDP port for video stream")
     parser.add_argument("--width", type=int, default=640, help="Image width in pixels")
     parsed = parser.parse_args()
@@ -355,9 +365,6 @@ def main(args=None):
         node.destroy_node()
         rclpy.shutdown()
 
-
-if __name__ == "__main__":
-    main()
 
 if __name__ == "__main__":
     main()
