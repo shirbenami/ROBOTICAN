@@ -5,11 +5,15 @@ from rclpy.client import Client
 
 from video_handler_interfaces.srv import SetVideoMode
 from std_msgs.msg import Bool
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CameraInfo
+from builtin_interfaces.msg import Time
 
 import numpy as np
 import cv2
 from cv_bridge import CvBridge
+
+import math
+from typing import Iterable, Optional
 
 import gi
 gi.require_version("Gst", "1.0")
@@ -20,10 +24,14 @@ Gst.init(None)
 
 
 class VideoExample(Node):
-    def __init__(self):
+    def __init__(self, high_resolution=640, host_ip="192.168.131.20", port=5001):
         super().__init__("video_example")
         self.id = "R2"
         self.i = 0
+        self.width = high_resolution
+        self.height = int(self.width * 9 / 16)
+        self.host = host_ip    # host IP
+        self.port = port
 
         # cv_bridge for publishing
         self.bridge = CvBridge()
@@ -48,6 +56,8 @@ class VideoExample(Node):
         self.image_pub = self.create_publisher(
             Image, f"/{self.id}/camera/image_raw", 10
         )
+        self.camera_info_pub = self.create_publisher(CameraInfo,
+                                                     f"/{self.id}/camera/camera_info", 10)
 
         # ---- GStreamer pipeline with appsink ----
         gst_pipeline = (
@@ -109,11 +119,10 @@ class VideoExample(Node):
         req = SetVideoMode.Request()
         req.camera_id = 0
         req.playing = True
-        req.port = 5001
-        req.host = "192.168.131.20"   # host IP
-        HIGH_RESO = 640
-        req.resolution_width = HIGH_RESO
-        req.resolution_height = int(HIGH_RESO * 9 / 16)
+        req.port = self.port
+        req.host = self.host   # host IP
+        req.resolution_width = self.width
+        req.resolution_height = self.height
         req.recording = False
         req.bitrate = SetVideoMode.Request.BITRATE_1500000
         req.fps = 0  # default
@@ -217,7 +226,93 @@ class VideoExample(Node):
         msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = f"{self.id}_camera"
+
+        camera_info_msg = self.make_camera_info(frame_id=msg.header.frame_id, stamp=msg.stamp)
+
         self.image_pub.publish(msg)
+        self.camera_info_pub.publish(camera_info_msg)
+
+
+    # CameraInfo creation:
+    def intrinsic_from_fov(self,  hfov_deg=130, vfov_deg=90, half_pixel=True):
+        theta_x = np.deg2rad(hfov_deg)
+        theta_y = np.deg2rad(vfov_deg)
+
+        fx = self.width / (2.0 * np.tan(theta_x / 2.0))
+        fy = self.height / (2.0 * np.tan(theta_y / 2.0))
+
+        if half_pixel:
+            cx = (self.width - 1) / 2.0
+            cy = (self.height - 1) / 2.0
+        else:
+            cx = self.width / 2.0
+            cy = self.height / 2.0
+
+        K = [fx, 0.0, cx,
+             0.0, fy, cy,
+             0.0, 0.0, 1.0]
+
+        return K
+
+    def make_camera_info(self, frame_id: str = "camera", stamp: Optional[Time] = None,
+            distortion_model: str = "plumb_bob",
+    ) -> CameraInfo:
+        """
+         Build a CameraInfo message for an ideal pinhole camera.
+
+         Args:
+             width, height: image size in pixels.
+             K: 3x3 intrinsic matrix (row-major, length 9 or 3x3 nested iterable).
+             frame_id: TF frame for this camera.
+             stamp: optional ROS2 time; if None, leave default.
+             distortion_model: usually 'plumb_bob' for pinhole.
+
+         Returns:
+             sensor_msgs.msg.CameraInfo
+         """
+        K = self.intrinsic_from_fov()
+        K_list = list(K)
+        if len(K_list) == 3 and hasattr(K_list[0], "__iter__"):
+            K_list = [float(v) for row in K_list for v in row]
+
+        if len(K_list) != 9:
+            raise ValueError("K must contain 9 elements (3x3 matrix)")
+
+        fx = K_list[0]
+        fy = K_list[4]
+        cx = K_list[2]
+        cy = K_list[5]
+
+        msg = CameraInfo()
+        if stamp is not None:
+            msg.header.stamp = stamp
+        msg.header.frame_id = frame_id
+
+        msg.width = self.width
+        msg.height = self.height
+
+        # Intrinsic matrix
+        msg.k = K_list
+
+        # Ideal camera: no distortion
+        msg.distortion_model = distortion_model
+        msg.d = [0.0, 0.0, 0.0, 0.0, 0.0]  # 5 coeffs is common, can also use 0-length
+
+        # Rectification matrix: identity (no stereo/rectification)
+        msg.r = [
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0,
+        ]
+
+        # Projection matrix P (3x4), for monocular camera: K with Tx=0
+        msg.p = [
+            fx, 0.0, cx, 0.0,
+            0.0, fy, cy, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+        ]
+
+        return msg
 
     # ---------- cleanup ----------
 
