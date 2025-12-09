@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import argparse
+
 import rclpy
 from rclpy.node import Node
 from rclpy.client import Client
@@ -23,14 +25,14 @@ from gi.repository import Gst, GstVideo
 Gst.init(None)
 
 
-class VideoExample(Node):
-    def __init__(self, high_resolution=640, host_ip="192.168.131.20", port=5001):
-        super().__init__("video_example")
-        self.id = "R2"
+class VideoStreamExample(Node):
+    def __init__(self, drone_id="R2", high_resolution=640, host_ip="192.168.131.24", port=5001):
+        super().__init__("video_stream_example")
+        self.id = drone_id
         self.i = 0
         self.width = high_resolution
         self.height = int(self.width * 9 / 16)
-        self.host = host_ip    # host IP
+        self.host = host_ip    # host IP "192.168.131.24" Laptop
         self.port = port
 
         # cv_bridge for publishing
@@ -58,6 +60,8 @@ class VideoExample(Node):
         )
         self.camera_info_pub = self.create_publisher(CameraInfo,
                                                      f"/{self.id}/camera/camera_info", 10)
+
+        self.camera_info_template = None
 
         # ---- GStreamer pipeline with appsink ----
         gst_pipeline = (
@@ -214,6 +218,9 @@ class VideoExample(Node):
         h, w, _ = frame.shape
         self.i += 1
 
+        # Build CameraInfo template once, when we see the first frame
+        if self.camera_info_template is None:
+            self.camera_info_template = self.make_camera_info()
         # occasional debug
         if self.i % 500 == 1:
             self.get_logger().info(f"Frame #{self.i}: {w}x{h}")
@@ -227,10 +234,14 @@ class VideoExample(Node):
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = f"{self.id}_camera"
 
-        camera_info_msg = self.make_camera_info(frame_id=msg.header.frame_id, stamp=msg.stamp)
+        ci = CameraInfo()
+        ci.__dict__.update(self.camera_info_template.__dict__)
+        ci.header.stamp = msg.header.stamp
+        ci.header.frame_id = msg.header.frame_id
+
 
         self.image_pub.publish(msg)
-        self.camera_info_pub.publish(camera_info_msg)
+        self.camera_info_pub.publish(ci)
 
 
     # CameraInfo creation:
@@ -324,14 +335,29 @@ class VideoExample(Node):
 
 
 def main(args=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--drone-id", default="R2", help="Drone ID (R1/R2/R3...)")
+    parser.add_argument("--host-ip", default="192.168.131.20", help="Host IP for UDP video sink")
+    parser.add_argument("--port", type=int, default=5001, help="UDP port for video stream")
+    parser.add_argument("--width", type=int, default=640, help="Image width in pixels")
+    parsed = parser.parse_args()
+
     rclpy.init(args=args)
-    node = VideoExample()
+    node = VideoStreamExample(
+        drone_id=parsed.drone_id,
+        high_resolution=parsed.width,
+        host_ip=parsed.host_ip,
+        port=parsed.port,
+    )
     try:
         rclpy.spin(node)
     finally:
         node.destroy_node()
         rclpy.shutdown()
 
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     main()
