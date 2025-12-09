@@ -2,7 +2,9 @@
 import os
 import time
 import argparse
+from logging import exception
 from typing import Optional
+import datetime
 
 import rclpy
 from rclpy.node import Node
@@ -88,8 +90,14 @@ class ImageStateBuffer(Node):
         super().__init__("image_state_buffer")
 
         self.drone_id = args.drone_id
-        self.out_dir = os.path.abspath(args.out_dir)
-        os.makedirs(self.out_dir, exist_ok=True)
+        out_dir = os.path.abspath(args.out_dir)
+        unique_out_dir = datetime.datetime.now().strftime("%Y_%m_%d___%H_%M_%S")
+        self.out_dir = os.path.join(out_dir, unique_out_dir)
+        try:
+            print(f"out_dir: {self.out_dir}")
+            os.makedirs(self.out_dir, exist_ok=True)
+        except Exception as exp:
+            self.get_logger().error(exp)
 
         self.bridge = CvBridge()
 
@@ -115,23 +123,33 @@ class ImageStateBuffer(Node):
         self.image_sub = None
         self.state_sub = None
         self.capture_enabled = False
-
-        # Services
-        self.start_capture_srv = self.create_service(
-            Trigger,
-            f"/{self.drone_id}/start_capture",
-            self.handle_start_capture,
-        )
-        self.stop_capture_srv = self.create_service(
-            Trigger,
-            f"/{self.drone_id}/stop_capture",
-            self.handle_stop_capture,
-        )
-        self.capture_srv = self.create_service(
-            Trigger,
-            f"/{self.drone_id}/capture_frame",
-            self.handle_capture,
-        )
+        # Create services
+        try:
+            # Services
+            self.start_capture_srv = self.create_service(
+                Trigger,
+                f"/{self.drone_id}/start_capture",
+                self.handle_start_capture,
+            )
+            self.stop_capture_srv = self.create_service(
+                Trigger,
+                f"/{self.drone_id}/stop_capture",
+                self.handle_stop_capture,
+            )
+            self.capture_srv = self.create_service(
+                Trigger,
+                f"/{self.drone_id}/capture_frame",
+                self.handle_capture,
+            )
+            # service to handle all 3 service above
+            self.capture_one_shot_srv = self.create_service(
+                Trigger,
+                f"/{self.drone_id}/capture_frame_one_shot",
+                self.handle_capture_one_shot,
+            )
+        except Exception as exp:
+            self.get_logger().error(exp)
+            raise exp
 
         self.get_logger().info(
             f"ImageStateBuffer started for {self.drone_id}\n"
@@ -141,6 +159,32 @@ class ImageStateBuffer(Node):
             f"  VLM:         {self.vlm_endpoint or '(disabled)'}\n"
             f"  capture:     initially OFF (no image/state subscriptions)"
         )
+
+        # Create clients for the services
+        try:
+            start_name = f"/{self.drone_id}/start_capture"
+            capture_name = f"/{self.drone_id}/capture_frame"
+            stop_name = f"/{self.drone_id}/stop_capture"
+
+            self.start_capture_cli = self.create_client(Trigger, start_name)
+            self.capture_frame_cli = self.create_client(Trigger, capture_name)
+            self.stop_capture_cli = self.create_client(Trigger, stop_name)
+
+            self.get_logger().info(
+                f"Waiting for capture services on {self.drone_id}: "
+                f"{start_name}, {capture_name}, {stop_name}"
+            )
+            for cli, name in [
+                (self.start_capture_cli, start_name),
+                (self.capture_frame_cli, capture_name),
+                (self.stop_capture_cli, stop_name),
+            ]:
+                if not cli.wait_for_service(timeout_sec=5.0):
+                    self.get_logger().warn(
+                        f"Service {name} not available yet (will still try on demand)."
+                    )
+        except Exception as exp:
+            self.get_logger().error(exp)
 
     # ------------------------------------------------------------------
     # Start/stop capture: create/destroy subscriptions
@@ -197,6 +241,74 @@ class ImageStateBuffer(Node):
         resp.success = True
         resp.message = msg
         return resp
+
+    def handle_capture_one_shot(self, request: Trigger.Request, context) -> Trigger.Response:
+        """
+        One-shot service: internally calls
+        start_capture -> capture_frame -> stop_capture
+        on the ImageStateBuffer node for this drone_id.
+        """
+        resp = Trigger.Response()
+
+        # 1) start_capture
+        start_resp = self._call_trigger(self.start_capture_cli, "start_capture")
+        if not start_resp.success:
+            resp.success = False
+            resp.message = f"start_capture failed: {start_resp.message}"
+            return resp
+
+        time.sleep(0.3)
+
+        # 2) capture_frame
+        capture_resp = self._call_trigger(self.capture_frame_cli, "capture_frame")
+        stop_resp = self._call_trigger(self.stop_capture_cli, "stop_capture")
+
+        if not capture_resp.success:
+            resp.success = False
+            resp.message = (
+                f"capture_frame failed: {capture_resp.message}; "
+                f"stop_capture: {stop_resp.message}"
+            )
+            return resp
+
+        resp.success = True
+        resp.message = (
+            f"capture_frame_one_shot OK: {capture_resp.message}; "
+            f"stop_capture: {stop_resp.message}"
+        )
+        return resp
+
+
+    def _call_trigger(self, client: rclpy.client.Client, name: str, timeout: float = 5.0) -> Trigger.Response:
+        """
+        Helper: call a std_srvs/Trigger service synchronously
+        and return its response (or a fake-failed response on error).
+        """
+        req = Trigger.Request()
+        future = client.call_async(req)
+
+        end_time = self.get_clock().now().nanoseconds * 1e-9 + timeout
+        while not future.done():
+            now = self.get_clock().now().nanoseconds * 1e-9
+            if now > end_time:
+                break
+            rclpy.spin_once(self, timeout_sec=0.1)
+
+        resp = Trigger.Response()
+        if not future.done():
+            resp.success = False
+            resp.message = f"{name}: timeout after {timeout:.1f}s"
+            self.get_logger().warn(resp.message)
+            return resp
+
+        try:
+            resp = future.result()
+        except Exception as e:
+            resp.success = False
+            resp.message = f"{name}: exception {e}"
+            self.get_logger().error(resp.message)
+        return resp
+
 
     # ------------------------------------------------------------------
     # Sub callbacks: keep latest messages in memory

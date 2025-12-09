@@ -9,9 +9,6 @@ from std_srvs.srv import Trigger
 from fcu_driver_interfaces.msg import UAVState  # adjust if your state msg is different
 
 
-CAPTURE_DELAY_SEC = 1.5 # wait this long after start_capture before frame_capture
-
-
 class AzimuthCaptureClient(Node):
     """
     Listens to /R2/fcu/state, converts yaw (radians) to degrees,
@@ -48,19 +45,12 @@ class AzimuthCaptureClient(Node):
         # trigger once per window per run
         self.already_triggered = {label: False for _, _, label in self.angle_windows}
 
-        # flag + timer to avoid overlapping sequences
+        # flag to avoid overlapping one-shot calls
         self.capture_busy: bool = False
-        self._frame_timer: Optional[rclpy.timer.Timer] = None
 
-        # service clients
-        self.start_capture_client = self.create_client(
-            Trigger, f"/{self.drone_id}/start_capture"
-        )
-        self.frame_capture_client = self.create_client(
-            Trigger, f"/{self.drone_id}/capture_frame"
-        )
-        self.stop_capture_client = self.create_client(
-            Trigger, f"/{self.drone_id}/stop_capture"
+        # one-shot capture service client
+        self.capture_one_shot_client = self.create_client(
+            Trigger, f"/{self.drone_id}/capture_frame_one_shot"
         )
 
         # subscriber to FCU state
@@ -82,14 +72,9 @@ class AzimuthCaptureClient(Node):
         return (deg + 360.0) % 360.0
 
     def services_ready(self) -> bool:
-        return (
-            self.start_capture_client.service_is_ready()
-            and self.frame_capture_client.service_is_ready()
-            and self.stop_capture_client.service_is_ready()
-        )
+        return self.capture_one_shot_client.service_is_ready()
 
     def state_callback(self, msg: UAVState):
-        # adjust field name if needed
         try:
             yaw_rad = msg.azimuth
         except AttributeError:
@@ -123,83 +108,25 @@ class AzimuthCaptureClient(Node):
 
         self.capture_busy = True
 
-        start_req = Trigger.Request()
-        future_start = self.start_capture_client.call_async(start_req)
+        req = Trigger.Request()
+        future = self.capture_one_shot_client.call_async(req)
 
-        def _start_done_cb(fut):
+        def _done_cb(fut):
             try:
                 resp = fut.result()
                 self.get_logger().info(
-                    f"{self.drone_id}: start_capture reply for window {label} "
+                    f"{self.drone_id}: capture_frame_one_shot reply for window {label} "
                     f"(az={az_deg:.5f} deg): success={resp.success}, msg='{resp.message}'"
                 )
-                if not resp.success:
-                    # abort sequence but still mark to avoid spamming this window
-                    self.capture_busy = False
-                    self.already_triggered[label] = True
-                    return
             except Exception as e:
                 self.get_logger().error(
-                    f"{self.drone_id}: start_capture call failed for window {label}: {e}"
-                )
-                self.capture_busy = False
-                self.already_triggered[label] = True
-                return
-
-            # schedule frame_capture after a short delay
-            if self._frame_timer is not None:
-                self._frame_timer.cancel()
-            self._frame_timer = self.create_timer(
-                CAPTURE_DELAY_SEC,
-                lambda: self._frame_capture_step(label, az_deg),
-            )
-
-        future_start.add_done_callback(_start_done_cb)
-
-    def _frame_capture_step(self, label: str, az_deg: float):
-        # stop this timer so it only fires once
-        if self._frame_timer is not None:
-            self._frame_timer.cancel()
-            self._frame_timer = None
-
-        frame_req = Trigger.Request()
-        future_frame = self.frame_capture_client.call_async(frame_req)
-
-        def _frame_done_cb(fut2):
-            try:
-                resp2 = fut2.result()
-                self.get_logger().info(
-                    f"{self.drone_id}: frame_capture reply for window {label} "
-                    f"(az={az_deg:.5f} deg): success={resp2.success}, msg='{resp2.message}'"
-                )
-            except Exception as e2:
-                self.get_logger().error(
-                    f"{self.drone_id}: frame_capture call failed for window {label}: {e2}"
+                    f"{self.drone_id}: capture_frame_one_shot call failed for window {label}: {e}"
                 )
 
-            # stop_capture regardless of frame result
-            stop_req = Trigger.Request()
-            future_stop = self.stop_capture_client.call_async(stop_req)
+            self.already_triggered[label] = True
+            self.capture_busy = False
 
-            def _stop_done_cb(fut3):
-                try:
-                    resp3 = fut3.result()
-                    self.get_logger().info(
-                        f"{self.drone_id}: stop_capture reply for window {label} "
-                        f"(az={az_deg:.5f} deg): success={resp3.success}, msg='{resp3.message}'"
-                    )
-                except Exception as e3:
-                    self.get_logger().error(
-                        f"{self.drone_id}: stop_capture call failed for window {label}: {e3}"
-                    )
-
-                # now mark this window as handled
-                self.already_triggered[label] = True
-                self.capture_busy = False
-
-            future_stop.add_done_callback(_stop_done_cb)
-
-        future_frame.add_done_callback(_frame_done_cb)
+        future.add_done_callback(_done_cb)
 
 
 def main(args=None):
