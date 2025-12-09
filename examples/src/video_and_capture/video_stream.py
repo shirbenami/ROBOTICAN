@@ -206,7 +206,7 @@ class VideoExample(Node):
         self.i += 1
 
         # occasional debug
-        if self.i % 30 == 1:
+        if self.i % 500 == 1:
             self.get_logger().info(f"Frame #{self.i}: {w}x{h}")
 
         # Optional: save a frame every 100 frames

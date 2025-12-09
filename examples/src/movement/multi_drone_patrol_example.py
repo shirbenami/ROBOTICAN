@@ -415,8 +415,8 @@ class SingleDroneFlying(Node):
     def destroy_node(self):
         # Dump path to CSV if we have samples
         if self.path_samples:
-            os.makedirs("paths", exist_ok=True)
-            filename = os.path.join("paths", f"{self.id}_path.csv")
+            os.makedirs("../paths", exist_ok=True)
+            filename = os.path.join("../paths", f"{self.id}_path.csv")
             with open(filename, "w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow(["t_sec", "x", "y", "z"])

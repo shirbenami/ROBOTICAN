@@ -2,7 +2,6 @@
 import os
 import time
 import argparse
-from logging import exception
 from typing import Optional
 import datetime
 
@@ -14,7 +13,7 @@ from fcu_driver_interfaces.msg import UAVState
 from std_srvs.srv import Trigger
 
 from cv_bridge import CvBridge
-from txt_and_image_utils import _update_sidecar_json
+from examples.src.helpers.txt_and_image_utils import _update_sidecar_json
 
 import requests
 import json
@@ -338,21 +337,12 @@ class ImageStateBuffer(Node):
         # Position-like fields
         if hasattr(state_msg, "position"):
             p = state_msg.position
-            pose["x"] = float(getattr(p, "x", 0.0))
-            pose["y"] = float(getattr(p, "y", 0.0))
-            pose["z"] = float(getattr(p, "z", 0.0))
-        elif hasattr(state_msg, "location"):
-            p = state_msg.location
-            pose["x"] = float(getattr(p, "x", 0.0))
-            pose["y"] = float(getattr(p, "y", 0.0))
-            pose["z"] = float(getattr(p, "z", 0.0))
+            pose["x"] = p.x #float(getattr(p, "x", 0.0))
+            pose["y"] = p.y #float(getattr(p, "y", 0.0))
+            pose["z"] = p.z #float(getattr(p, "z", 0.0))
 
         # Heading-like field
-        if hasattr(state_msg, "yaw"):
-            pose["yaw"] = float(state_msg.yaw)
-        elif hasattr(state_msg, "heading"):
-            pose["yaw"] = float(state_msg.heading)
-        elif hasattr(state_msg, "azimuth"):
+        if hasattr(state_msg, "azimuth"):
             pose["yaw"] = float(state_msg.azimuth)
 
         # Round to 5 digits like you asked
