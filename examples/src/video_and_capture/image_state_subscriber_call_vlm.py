@@ -9,7 +9,9 @@ import rclpy
 from rclpy.node import Node
 
 from sensor_msgs.msg import Image
+from std_msgs.msg import Float32
 from fcu_driver_interfaces.msg import UAVState
+
 from std_srvs.srv import Trigger
 
 from cv_bridge import CvBridge
@@ -89,6 +91,7 @@ class ImageStateBuffer(Node):
         super().__init__("image_state_buffer")
 
         self.drone_id = args.drone_id
+        self.pose_mode = getattr(args, "pose_mode", "state")
         out_dir = os.path.abspath(args.out_dir)
         unique_out_dir = datetime.datetime.now().strftime("%Y_%m_%d___%H_%M_%S")
         self.out_dir = os.path.join(out_dir, unique_out_dir)
@@ -122,6 +125,15 @@ class ImageStateBuffer(Node):
         self.image_sub = None
         self.state_sub = None
         self.capture_enabled = False
+
+        # --- AprilTag azimuth subscriber ---
+        self.azimuth_value = None
+        azimuth_topic = f"/{self.drone_id}/camera_azimuth"
+        self.azimuth_sub = self.create_subscription(
+            Float32, azimuth_topic, self._azimuth_callback, 10
+        )
+        self.get_logger().info(f"Subscribed to AprilTag azimuth topic: {azimuth_topic}")
+
         # Create services
         try:
             # Services
@@ -323,6 +335,10 @@ class ImageStateBuffer(Node):
         msg = "State msg received"
         self.get_logger().info(msg)
 
+    def _azimuth_callback(self, msg: Float32):
+        """Store the latest AprilTag-based azimuth."""
+        self.azimuth_value = float(msg.data)
+
     # ------------------------------------------------------------------
     # Helper: extract pose dict from UAVState
     # ------------------------------------------------------------------
@@ -390,6 +406,10 @@ class ImageStateBuffer(Node):
             return resp
 
         pose = self.extract_pose_from_state(state_msg)
+
+        # Optionally override yaw with AprilTag azimuth if available
+        if self.azimuth_value is not None:
+            pose["yaw"] = round(self.azimuth_value, 5)
 
         # Use image ROS time for filename
         stamp = img_msg.header.stamp
@@ -507,6 +527,18 @@ def main():
         "--vlm-path-dst",
         default="/mnt/VLM/jetson-data",
         help="Optional path root to remap TO for VLM",
+    )
+
+    parser.add_argument(
+        "--pose-mode",
+        choices=["state", "april", "both"],
+        default="state",
+        help=(
+            "How to compute pose for JSON: "
+            "'state' = from /fcu/state (current behavior), "
+            "'april' = from AprilTag-based function, "
+            "'both' = merge AprilTag pose into state pose."
+        ),
     )
 
     args = parser.parse_args()

@@ -1,0 +1,8 @@
+# Example:
+# name x y z r duration_sec
+A 0 0 200 0 3
+B 0 0 220 800 4
+C 0 0 200 100 1
+D 0 0 250 -700 4
+E 0 0 200 -100 1
+
