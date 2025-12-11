@@ -2,10 +2,12 @@
 """
 Turn Left Agent
 ---------------------------------
-Rotates drone 45° counterclockwise.
-Service: /{rooster_id}/turn_left
+Rotates drone counterclockwise (default 90°).
+Supports time-based or yaw-based controller.
 
-Automatically arms the drone if not armed.
+Usage:
+  python turn_left_agent.py --controller time --degrees 90
+  python turn_left_agent.py --controller yaw --degrees 45
 """
 
 import time
@@ -16,38 +18,46 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 
 from std_srvs.srv import Trigger, SetBool
 
-from controller.rooster_yaw_controller import YawController
-
 
 class TurnLeftAgent(Node):
-    def __init__(self, rooster_id: str = "R1", hover_throttle: float = 200.0):
+    def __init__(self, rooster_id: str = "R1", hover_throttle: float = 200.0,
+                 controller_type: str = "time", rotation_degrees: float = 90.0):
         super().__init__(f"turn_left_agent_{rooster_id}")
 
         self.rooster_id = rooster_id
         self.hover_throttle = hover_throttle
+        self.rotation_degrees = rotation_degrees
 
-        # Create yaw controller for this drone
-        self.yaw_ctrl = YawController(
-            rooster_id=rooster_id,
-            name=f"turn_left_yaw_{rooster_id}"
-        )
+        # Create controller based on type
+        if controller_type == "time":
+            from controller.rooster_time_controller import TimeYawController
+            self.yaw_ctrl = TimeYawController(
+                rooster_id=rooster_id,
+                name=f"turn_left_time_{rooster_id}"
+            )
+            self.get_logger().info("Using TIME-based controller")
+        else:
+            from controller.rooster_yaw_controller import YawController
+            self.yaw_ctrl = YawController(
+                rooster_id=rooster_id,
+                name=f"turn_left_yaw_{rooster_id}"
+            )
+            self.get_logger().info("Using YAW-based controller")
 
         # Create service
-        service_name = f"/{rooster_id}/turn_left"
         self.srv = self.create_service(
             Trigger,
-            service_name,
+            f"/{rooster_id}/turn_left",
             self.handle_request,
             callback_group=MutuallyExclusiveCallbackGroup()
         )
 
-        self.get_logger().info(f"TurnLeftAgent ready for {rooster_id} (45° counterclockwise)")
+        self.get_logger().info(f"TurnLeftAgent ready for {rooster_id} ({rotation_degrees}° CCW)")
 
     def ensure_armed_and_airborne(self) -> bool:
-        """Ensure the drone is armed and airborne. Returns True if ready."""
-        # Check if already armed
+        """Ensure drone is armed and airborne."""
         if not self.yaw_ctrl.is_armed:
-            self.get_logger().info(f"[{self.rooster_id}] Drone not armed, arming...")
+            self.get_logger().info(f"[{self.rooster_id}] Arming...")
 
             if not self.yaw_ctrl.force_arm_client.wait_for_service(timeout_sec=2.0):
                 self.get_logger().error("force_arm service not available!")
@@ -57,46 +67,28 @@ class TurnLeftAgent(Node):
             req.data = True
             future = self.yaw_ctrl.force_arm_client.call_async(req)
 
-            # Wait for arm response
             start = time.time()
             while not future.done() and time.time() - start < 3.0:
                 time.sleep(0.05)
 
-            if future.done():
-                try:
-                    result = future.result()
-                    self.get_logger().info(f"Arm result: {result.message}")
-                except Exception as e:
-                    self.get_logger().error(f"Arm exception: {e}")
-                    return False
-
-            # Wait for arming to take effect
             time.sleep(1.0)
 
-        # Apply throttle to get airborne
         if not self.yaw_ctrl.is_airborne:
-            self.get_logger().info(f"[{self.rooster_id}] Applying throttle to get airborne...")
+            self.get_logger().info(f"[{self.rooster_id}] Applying throttle...")
             self.yaw_ctrl.current_z = self.hover_throttle
 
-            # Wait to become airborne
             start = time.time()
             while not self.yaw_ctrl.is_airborne and time.time() - start < 5.0:
                 time.sleep(0.1)
 
             if not self.yaw_ctrl.is_airborne:
-                self.get_logger().warn("Failed to become airborne, trying higher throttle...")
                 self.yaw_ctrl.current_z = 400.0
                 time.sleep(2.0)
 
-        self.get_logger().info(
-            f"[{self.rooster_id}] Armed: {self.yaw_ctrl.is_armed}, Airborne: {self.yaw_ctrl.is_airborne}")
         return self.yaw_ctrl.is_armed
 
     def _disarm(self):
         """Disarm the drone."""
-        self.get_logger().info(f"[{self.rooster_id}] Disarming...")
-
-        # Stop all movement first
         self.yaw_ctrl.current_x = 0.0
         self.yaw_ctrl.current_y = 0.0
         self.yaw_ctrl.current_z = 0.0
@@ -104,7 +96,6 @@ class TurnLeftAgent(Node):
         time.sleep(0.1)
 
         if not self.yaw_ctrl.force_arm_client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().error("force_arm service not available for disarm!")
             return False
 
         req = SetBool.Request()
@@ -115,32 +106,22 @@ class TurnLeftAgent(Node):
         while not future.done() and time.time() - start < 2.0:
             time.sleep(0.05)
 
-        if future.done():
-            try:
-                result = future.result()
-                self.get_logger().info(f"[{self.rooster_id}] Disarm: {result.message}")
-            except Exception as e:
-                self.get_logger().error(f"Disarm exception: {e}")
+        self.get_logger().info(f"[{self.rooster_id}] Disarmed")
         return True
 
     def handle_request(self, request, response):
-        self.get_logger().info(f"[{self.rooster_id}] Executing 45° left turn...")
+        self.get_logger().info(f"[{self.rooster_id}] Executing {self.rotation_degrees}° left turn...")
 
-        # Ensure drone is armed and airborne
         if not self.ensure_armed_and_airborne():
             response.success = False
             response.message = "Failed to arm drone"
             return response
 
-        # Perform rotation
-        success = self.yaw_ctrl.rotate(-45, hover_throttle=self.yaw_ctrl.current_z)
-
-        # Disarm after rotation
+        success = self.yaw_ctrl.rotate(-self.rotation_degrees, hover_throttle=self.yaw_ctrl.current_z)
         self._disarm()
 
         response.success = success
         response.message = "Turn left complete" if success else "Turn failed"
-
         return response
 
 
@@ -149,14 +130,24 @@ def main():
 
     parser = argparse.ArgumentParser(description="Turn Left Agent")
     parser.add_argument("--rooster", "-r", type=str, default="R1",
-                        help="Rooster ID (R1, R1, or R3)")
+                        help="Rooster ID (R1, R2, R3)")
     parser.add_argument("--throttle", "-t", type=float, default=200.0,
-                        help="Hover throttle (z value, range -1000 to 1000)")
+                        help="Hover throttle (-1000 to 1000)")
+    parser.add_argument("--controller", "-c", type=str, default="time",
+                        choices=["time", "yaw"],
+                        help="Controller type: 'time' or 'yaw'")
+    parser.add_argument("--degrees", "-d", type=float, default=90.0,
+                        help="Rotation degrees")
     args = parser.parse_args()
 
     rclpy.init()
 
-    node = TurnLeftAgent(rooster_id=args.rooster, hover_throttle=args.throttle)
+    node = TurnLeftAgent(
+        rooster_id=args.rooster,
+        hover_throttle=args.throttle,
+        controller_type=args.controller,
+        rotation_degrees=args.degrees
+    )
 
     executor = MultiThreadedExecutor(num_threads=2)
     executor.add_node(node)
