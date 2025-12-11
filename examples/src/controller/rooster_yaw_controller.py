@@ -49,8 +49,9 @@ class YawController(Node):
         self._armed = False
         self._airborne = False
 
-        # Azimuth filtering
-        self._azimuth_history = deque(maxlen=10)  # Last K values
+        # Azimuth filtering - only last K values (small K for fast rotation)
+        self._azimuth_k = 5
+        self._azimuth_history = deque(maxlen=self._azimuth_k)
         self._azimuth_filtered = 0.0
         self._outlier_threshold = math.radians(45)  # Max jump to consider valid
 
@@ -226,7 +227,7 @@ class YawController(Node):
                     self.get_logger().info(f"[COAST] {math.degrees(abs_error):.1f}° remaining")
                 self.current_r = 0.0
 
-            time.sleep(0.5)
+            time.sleep(0.025)
 
         self._stop()
         final_err = math.degrees(abs(normalize_angle(target_yaw - self.yaw)))
