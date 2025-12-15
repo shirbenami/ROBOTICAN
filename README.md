@@ -26,7 +26,7 @@ ROS_DOMAIN_ID=9
 ```
 ## Step 4: Build ROS2 workspace in docker container
 ```bash
-docker compose up build_ws
+docker compose up build_ws 
 ```
 
 ## Step 5: Start interactive container

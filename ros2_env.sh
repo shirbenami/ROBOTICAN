@@ -25,7 +25,7 @@ fi
 
 # 4) Set CycloneDDS + domain
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-export ROS_DOMAIN_ID=2
+export ROS_DOMAIN_ID=5
 
 # Different config paths on host vs Jetson:
 if [ -f /etc/cyclonedds/cyclonedds.xml ]; then

@@ -71,13 +71,14 @@ This script sends video streams from drones into ROS2 topics.
 **Location:**
 
 ```
-/home/rooster/workspace/src/examples/src/multi_video_stream.py
+/home/rooster/workspace/src/examples/src/video_stream.py
 ```
 
 **Run:**
 
 ```bash
-python3 multi_video_stream.py
+sudo apt-get install ros-foxy-cv-bridge
+python3 python3 video_stream.py
 ```
 
 ---
@@ -174,18 +175,51 @@ source /opt/ros/humble/setup.bash
 ### 4️⃣ Run AprilTag Node
 
 ```bash
-ros2 run apriltag_ros apriltag_node --ros-args   -r image:=/R1/camera/image_raw   -r camera_info:=/R1/camera/camera_info   -p family:=36h11   -p size:=0.20   -p publish_tf:=true
+ros2 run apriltag_ros apriltag_node --ros-args \
+  -r image_rect:=/R1/camera/image_raw \
+  -r camera_info:=/R1/camera/camera_info \
+  -p family:=36h11 \
+  -p size:=2.00 \
+  -p publish_tf:=true
 ```
 
-### 5️⃣ Check AprilTag Topics (Second Humble Terminal)
+
+ #ros2 run apriltag_ros apriltag_node --ros-args   -r image_rect:=/R1/camera/image_raw   -r camera_info:=/R1/camera/camera_info   -p family:=36h11   -p size:=20.0   -p decimate:=1.0   -p blur:=0.0   -p refine_edges:=true   -p publish_tf:=true
+
+
+
+### Check AprilTag Topics (Second Humble Terminal)
 
 In another terminal (attached to the same container or another Humble container configured with the same ROS_DOMAIN_ID and RMW):
 
 ```bash
 ros2 topic list | grep apriltag
 ros2 topic echo /detections
+ros2 topic echo /tf
 ```
 
+
+### 5️⃣ Run Tag-Based Azimuth Node (AprilTag → Continuous Yaw)
+
+This step runs a Python node that computes the camera/drone azimuth (0–360°) using the TF frames published by apriltag_node (publish_tf:=true).
+
+The script:
+
+looks up TF between the camera frame (e.g. R1_camera) and AprilTag frames (e.g. tag36h11:<id>)
+
+publishes continuous azimuth to /<robot_ns>/camera_azimuth
+
+provides a service get_azimuth_at_time to query the closest azimuth sample for a requested timestamp
+
+```bash
+cd ~/workspace/src/examples/src/apriltag
+python3 tag_based_azimuth_continuous.py --ros-args -p robot_ns:=R1
+```
+
+Verify Azimuth Topic
+```bash
+ros2 topic echo /R1/camera_azimuth
+```
 ---
 
 ## 📁 Repository Structure

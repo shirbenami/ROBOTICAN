@@ -1,7 +1,7 @@
 <CycloneDDS xmlns="https://cdds.io/config">
   <Domain id="any">
     <General>
-      <NetworkInterfaceAddress>enx00e04c6807d3</NetworkInterfaceAddress>
+      <NetworkInterfaceAddress>192.168.131.0</NetworkInterfaceAddress>
       <AllowMulticast>true</AllowMulticast>
     </General>
     <Discovery>

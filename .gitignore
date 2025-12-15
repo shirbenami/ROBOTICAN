@@ -2,3 +2,9 @@
 examples/src/keyboard_contorl/csv/
 
 examples/src/__pycache__/
+
+*.pyc
+
+*.obj
+
+*.mtl

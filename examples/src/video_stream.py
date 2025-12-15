@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
+import argparse
+
 import rclpy
 from rclpy.node import Node
 from rclpy.client import Client
 
 from video_handler_interfaces.srv import SetVideoMode
 from std_msgs.msg import Bool
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CameraInfo
+from builtin_interfaces.msg import Time
 
 import numpy as np
 import cv2
 from cv_bridge import CvBridge
+import copy
+import math
+from typing import Iterable, Optional
 
 import gi
 gi.require_version("Gst", "1.0")
@@ -19,11 +25,15 @@ from gi.repository import Gst, GstVideo
 Gst.init(None)
 
 
-class VideoExample(Node):
-    def __init__(self):
-        super().__init__("video_example")
-        self.id = "R2"
+class VideoStreamExample(Node):
+    def __init__(self, drone_id="R1", high_resolution=640, host_ip="192.168.131.24", port=5001):
+        super().__init__("video_stream_example")
+        self.id = drone_id
         self.i = 0
+        self.width = high_resolution
+        self.height = int(self.width * 9 / 16)
+        self.host = host_ip    # host IP "192.168.131.24" Laptop
+        self.port = port
 
         # cv_bridge for publishing
         self.bridge = CvBridge()
@@ -48,6 +58,14 @@ class VideoExample(Node):
         self.image_pub = self.create_publisher(
             Image, f"/{self.id}/camera/image_raw", 10
         )
+        self.camera_info_pub = self.create_publisher(CameraInfo,
+                                                     f"/{self.id}/camera/camera_info", 10)
+
+        self.camera_info_template = None
+        self.camera_info_pub = self.create_publisher(
+            CameraInfo, f"/{self.id}/camera/camera_info", 10
+        )
+
 
         # ---- GStreamer pipeline with appsink ----
         gst_pipeline = (
@@ -57,6 +75,7 @@ class VideoExample(Node):
             "rtph264depay ! "
             "decodebin ! "
             "videoconvert ! "
+            "videocrop name=cropper top=50 left=50 right=50 bottom=50 ! "
             "video/x-raw,format=BGR ! "
             "appsink name=mysink emit-signals=true sync=false max-buffers=1 drop=true"
         )
@@ -109,11 +128,10 @@ class VideoExample(Node):
         req = SetVideoMode.Request()
         req.camera_id = 0
         req.playing = True
-        req.port = 5001
-        req.host = "192.168.131.20"   # host IP
-        HIGH_RESO = 640
-        req.resolution_width = HIGH_RESO
-        req.resolution_height = int(HIGH_RESO * 9 / 16)
+        req.port = self.port
+        req.host = self.host   # host IP
+        req.resolution_width = self.width
+        req.resolution_height = self.height
         req.recording = False
         req.bitrate = SetVideoMode.Request.BITRATE_1500000
         req.fps = 0  # default
@@ -204,9 +222,15 @@ class VideoExample(Node):
         """
         h, w, _ = frame.shape
         self.i += 1
-
+        
+        # Build CameraInfo template once, when we see the first frame
+        if self.camera_info_template is None:
+            # Use the camera frame id you actually publish on images
+            self.camera_info_template = self.make_camera_info(
+                frame_id=f"{self.id}_camera"
+            )
         # occasional debug
-        if self.i % 30 == 1:
+        if self.i % 500 == 1:
             self.get_logger().info(f"Frame #{self.i}: {w}x{h}")
 
         # Optional: save a frame every 100 frames
@@ -217,7 +241,99 @@ class VideoExample(Node):
         msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = f"{self.id}_camera"
+
+        ci = copy.deepcopy(self.camera_info_template)
+        # Update header + size (in case the actual frame size differs)
+        ci.header.stamp = msg.header.stamp
+        ci.header.frame_id = msg.header.frame_id
+        ci.width = w
+        ci.height = h
+
+
         self.image_pub.publish(msg)
+        self.camera_info_pub.publish(ci)
+
+
+    # CameraInfo creation:
+    def intrinsic_from_fov(self,  hfov_deg=130, vfov_deg=90, half_pixel=True):
+        theta_x = np.deg2rad(hfov_deg)
+        theta_y = np.deg2rad(vfov_deg)
+
+        fx = self.width / (2.0 * np.tan(theta_x / 2.0))
+        fy = self.height / (2.0 * np.tan(theta_y / 2.0))
+
+        if half_pixel:
+            cx = (self.width - 1) / 2.0
+            cy = (self.height - 1) / 2.0
+        else:
+            cx = self.width / 2.0
+            cy = self.height / 2.0
+
+        K = [fx, 0.0, cx,
+             0.0, fy, cy,
+             0.0, 0.0, 1.0]
+
+        return K
+
+    def make_camera_info(self, frame_id: str = "camera", stamp: Optional[Time] = None,
+            distortion_model: str = "plumb_bob",
+    ) -> CameraInfo:
+        """
+         Build a CameraInfo message for an ideal pinhole camera.
+
+         Args:
+             width, height: image size in pixels.
+             K: 3x3 intrinsic matrix (row-major, length 9 or 3x3 nested iterable).
+             frame_id: TF frame for this camera.
+             stamp: optional ROS2 time; if None, leave default.
+             distortion_model: usually 'plumb_bob' for pinhole.
+
+         Returns:
+             sensor_msgs.msg.CameraInfo
+         """
+        K = self.intrinsic_from_fov()
+        K_list = list(K)
+        if len(K_list) == 3 and hasattr(K_list[0], "__iter__"):
+            K_list = [float(v) for row in K_list for v in row]
+
+        if len(K_list) != 9:
+            raise ValueError("K must contain 9 elements (3x3 matrix)")
+
+        fx = K_list[0]
+        fy = K_list[4]
+        cx = K_list[2]
+        cy = K_list[5]
+
+        msg = CameraInfo()
+        if stamp is not None:
+            msg.header.stamp = stamp
+        msg.header.frame_id = frame_id
+
+        msg.width = self.width
+        msg.height = self.height
+
+        # Intrinsic matrix
+        msg.k = K_list
+
+        # Ideal camera: no distortion
+        msg.distortion_model = distortion_model
+        msg.d = [0.0, 0.0, 0.0, 0.0, 0.0]  # 5 coeffs is common, can also use 0-length
+
+        # Rectification matrix: identity (no stereo/rectification)
+        msg.r = [
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0,
+        ]
+
+        # Projection matrix P (3x4), for monocular camera: K with Tx=0
+        msg.p = [
+            fx, 0.0, cx, 0.0,
+            0.0, fy, cy, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+        ]
+
+        return msg
 
     # ---------- cleanup ----------
 
@@ -229,8 +345,20 @@ class VideoExample(Node):
 
 
 def main(args=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--drone-id", default="R1", help="Drone ID (R1/R2/R3...)")
+    parser.add_argument("--host-ip", default="192.168.131.20", help="Host IP for UDP video sink")
+    parser.add_argument("--port", type=int, default=5001, help="UDP port for video stream")
+    parser.add_argument("--width", type=int, default=640, help="Image width in pixels")
+    parsed = parser.parse_args()
+
     rclpy.init(args=args)
-    node = VideoExample()
+    node = VideoStreamExample(
+        drone_id=parsed.drone_id,
+        high_resolution=parsed.width,
+        host_ip=parsed.host_ip,
+        port=parsed.port,
+    )
     try:
         rclpy.spin(node)
     finally:
