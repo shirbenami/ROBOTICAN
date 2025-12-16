@@ -69,13 +69,13 @@ class VideoStreamExample(Node):
 
         # ---- GStreamer pipeline with appsink ----
         gst_pipeline = (
-            "udpsrc port=5001 "
+            f"udpsrc port={self.port} "
             "caps=application/x-rtp,media=(string)video,clock-rate=(int)90000,"
             "encoding-name=(string)H264,payload=(int)96 ! "
             "rtph264depay ! "
             "decodebin ! "
             "videoconvert ! "
-            "videocrop name=cropper top=50 left=50 right=50 bottom=50 ! "
+           # "videocrop name=cropper top=42 left=1 right=4 bottom=0 ! "
             "video/x-raw,format=BGR ! "
             "appsink name=mysink emit-signals=true sync=false max-buffers=1 drop=true"
         )
@@ -347,7 +347,7 @@ class VideoStreamExample(Node):
 def main(args=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--drone-id", default="R2", help="Drone ID (R1/R2/R3...)")
-    parser.add_argument("--host-ip", default="192.168.131.24", help="Host IP for UDP video sink")
+    parser.add_argument("--host-ip", default="192.168.131.22", help="Host IP for UDP video sink")
     parser.add_argument("--port", type=int, default=5001, help="UDP port for video stream")
     parser.add_argument("--width", type=int, default=640, help="Image width in pixels")
     parsed = parser.parse_args()

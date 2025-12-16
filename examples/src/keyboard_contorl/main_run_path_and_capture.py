@@ -6,9 +6,10 @@ from typing import List, Tuple
 import rclpy
 from rclpy.node import Node
 
+from fcu_driver_interfaces.msg import ManualControl, UAVState
 from rooster_handler_interfaces.msg import KeepAlive
 from fcu_driver_interfaces.msg import ManualControl
-from std_srvs.srv import Trigger
+from std_srvs.srv import Trigger, SetBool
 
 from manual_core import ManualCommandModel  # uses same axis logic as GUI
 
@@ -17,6 +18,7 @@ class PathRunnerNode(Node):
     """
     Minimal path runner:
 
+    - Optionally arms the drone via /<ROOSTER_ID>/fcu/command/arm.
     - Publishes /<ROOSTER_ID>/manual_control at ~40 Hz during segments.
     - Publishes /<ROOSTER_ID>/keep_alive at ~1 Hz while running.
     - Reads path segments from a text file or from a hard-coded list.
@@ -29,13 +31,15 @@ class PathRunnerNode(Node):
         rooster_id: str,
         flight_mode: int,
         turtle: bool = False,
-        capture_period: float = 5.0,
+        capture_period: float = 1.0,
+        arm_before_path: bool = True,
     ):
         super().__init__("path_runner")
 
         self.rooster_id = rooster_id
         self.flight_mode = int(flight_mode)
         self.capture_period = float(capture_period)
+        self.arm_before_path = bool(arm_before_path)
 
         # Track when we should actually capture (only while path is running)
         self.capture_enabled = False
@@ -47,7 +51,9 @@ class PathRunnerNode(Node):
 
         manual_topic = f"/{self.rooster_id}/manual_control"
         keep_alive_topic = f"/{self.rooster_id}/keep_alive"
-        capture_service_name = f"/{self.rooster_id}/capture_frame_one_shot"
+        capture_service_name = f"/{self.rooster_id}/capture_frame"
+        arm_service_name = f"/{self.rooster_id}/fcu/command/force_arm"
+
 
         self.manual_pub = self.create_publisher(ManualControl, manual_topic, 10)
         self.keep_alive_pub = self.create_publisher(KeepAlive, keep_alive_topic, 10)
@@ -55,14 +61,24 @@ class PathRunnerNode(Node):
         # Service client for image capture
         self.capture_client = self.create_client(Trigger, capture_service_name)
 
+        # Service client for arming
+        self.force_arm_client = self.create_client(SetBool, arm_service_name)
+
         # Timer to call capture service periodically (disabled logically by flag)
         self.capture_timer = self.create_timer(
             self.capture_period, self._capture_timer_cb
         )
+        self.last_uav_state = None
+        self.uav_state_sub = self.create_subscription(
+            UAVState,
+            f"/{self.rooster_id}/fcu/state",
+            self.uav_state_callback,
+            10,
+        )
 
         # Optional: to avoid log spam when service isn't ready
         self._last_capture_warn_time = 0.0
-        self._capture_warn_interval = 5.0  # seconds
+        self._capture_warn_interval = 0.5  # seconds
 
         self.get_logger().info(
             f"PathRunnerNode for {self.rooster_id} (flight_mode={self.flight_mode})"
@@ -72,6 +88,9 @@ class PathRunnerNode(Node):
         )
         self.get_logger().info(
             f"Image capture service (timer): {capture_service_name}, period={self.capture_period}s"
+        )
+        self.get_logger().info(
+            f"Arm service: {arm_service_name}, arm_before_path={self.arm_before_path}"
         )
 
     # ---------- low-level send functions ----------
@@ -92,6 +111,64 @@ class PathRunnerNode(Node):
         msg.r = axes.r
         msg.buttons = 0
         self.manual_pub.publish(msg)
+
+    # ---------- arming ----------
+
+    def try_arm_drone(self, timeout: float = 5.0) -> bool:
+        if self.force_arm_client is None:
+            self.get_logger().error("No force_arm client created.")
+            return False
+
+        # 1) Warm up KeepAlive like the GUI does
+        self.get_logger().info(f"{self.rooster_id}: warm-up keep_alive before force_arm")
+        t0 = time.time()
+        while time.time() - t0 < 2.0 and rclpy.ok():
+            self._send_keep_alive()
+            self.command_model.reset_axes()
+            self._send_manual()
+            rclpy.spin_once(self, timeout_sec=0.05)
+            time.sleep(0.05)
+
+        # 2) Wait for service
+        self.get_logger().info(f"{self.rooster_id}: waiting for force_arm service...")
+        if not self.force_arm_client.wait_for_service(timeout_sec=5.0):
+            self.get_logger().error("force_arm service not available")
+            return False
+
+        self.get_logger().info(f"{self.rooster_id}: calling force_arm=True")
+        req = SetBool.Request()
+        req.data = True
+        future = self.force_arm_client.call_async(req)
+
+        # 3) Wait for response
+        end_time = time.time() + timeout
+        while rclpy.ok() and not future.done() and time.time() < end_time:
+            rclpy.spin_once(self, timeout_sec=0.05)
+
+        if not future.done():
+            self.get_logger().error("force_arm timed out")
+            return False
+
+        resp = future.result()
+        self.get_logger().info(
+            f"{self.rooster_id}: force_arm response: success={resp.success}, msg='{resp.message}'"
+        )
+        if not resp.success:
+            return False
+
+        # 4) Wait for UAVState.armed == True
+        self.get_logger().info(f"{self.rooster_id}: waiting for UAVState.armed == True")
+        t0 = time.time()
+        while time.time() - t0 < timeout and rclpy.ok():
+            if self.last_uav_state is not None and self.last_uav_state.armed:
+                self.get_logger().info(f"{self.rooster_id}: UAV is armed (UAVState.armed=True)")
+                return True
+            rclpy.spin_once(self, timeout_sec=0.05)
+
+        self.get_logger().warn(
+            f"{self.rooster_id}: force_arm service succeeded but UAVState.armed is still False"
+        )
+        return False
 
     # ---------- image capture via timer ----------
 
@@ -128,6 +205,9 @@ class PathRunnerNode(Node):
 
         future.add_done_callback(_done_cb)
 
+    def uav_state_callback(self, msg: UAVState):
+        self.last_uav_state = msg
+
     # ---------- high-level path execution ----------
 
     def run_path(
@@ -141,6 +221,13 @@ class PathRunnerNode(Node):
         if not segments:
             self.get_logger().warn("Empty path, nothing to do.")
             return
+
+        # Try to arm before starting
+        if self.arm_before_path:
+            ok = self.try_arm_drone()
+            if not ok:
+                self.get_logger().error("Aborting path: failed to arm drone.")
+                return
 
         self.get_logger().info(
             f"Starting path '{path_name}' with {len(segments)} segments."
@@ -295,6 +382,11 @@ def main():
         default=5.0,
         help="Seconds between capture_frame_one_shot calls while path is running.",
     )
+    parser.add_argument(
+        "--no-arm",
+        action="store_true",
+        help="Do not call /<ROOSTER_ID>/fcu/command/arm before running the path.",
+    )
     args = parser.parse_args()
 
     segments = parse_path_file(args.path)
@@ -305,6 +397,7 @@ def main():
         flight_mode=args.flight_mode,
         turtle=args.turtle,
         capture_period=args.capture_period,
+        arm_before_path=not args.no_arm,
     )
     try:
         node.run_path(segments, path_name=args.path)

@@ -7,6 +7,12 @@ import datetime
 
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.qos import qos_profile_sensor_data
+
+from concurrent.futures import ThreadPoolExecutor
+
 
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32
@@ -15,7 +21,7 @@ from fcu_driver_interfaces.msg import UAVState
 from std_srvs.srv import Trigger
 
 from cv_bridge import CvBridge
-from examples.src.helpers.txt_and_image_utils import _update_sidecar_json
+from txt_and_image_utils import _update_sidecar_json
 
 import requests
 import json
@@ -47,9 +53,9 @@ def _call_vlm(endpoint: Optional[str], image_path_for_vlm: str,
                 data = r.json()
                 if isinstance(data, dict):
                     return (
-                        data.get("response")
-                        or data.get("caption")
-                        or json.dumps(data, ensure_ascii=False)
+                            data.get("response")
+                            or data.get("caption")
+                            or json.dumps(data, ensure_ascii=False)
                     )
                 return json.dumps(data, ensure_ascii=False)
             except ValueError:
@@ -102,6 +108,7 @@ class ImageStateBuffer(Node):
             self.get_logger().error(exp)
 
         self.bridge = CvBridge()
+        self.reentrant_cb_group = ReentrantCallbackGroup()
 
         # VLM config (optional)
         self.vlm_endpoint: Optional[str] = args.vlm
@@ -118,13 +125,17 @@ class ImageStateBuffer(Node):
         self.last_img_msg: Optional[Image] = None
         self.last_state_msg: Optional[UAVState] = None
 
+        self.executor_pool = ThreadPoolExecutor(max_workers=2)
+
         # Approx sync tolerance (seconds)
         self.sync_slop = 0.10  # 100 ms
 
         # Subscriptions (created/destroyed on demand)
-        self.image_sub = None
-        self.state_sub = None
-        self.capture_enabled = False
+        self.image_sub = self.create_subscription(
+            Image, self.image_topic, self.image_cb, 10)
+        self.state_sub = self.create_subscription(
+            UAVState, self.state_topic, self.state_cb, 10)
+        self.capture_enabled = True  # Capture is always logically enabled
 
         # --- AprilTag azimuth subscriber ---
         self.azimuth_value = None
@@ -136,28 +147,13 @@ class ImageStateBuffer(Node):
 
         # Create services
         try:
-            # Services
-            self.start_capture_srv = self.create_service(
-                Trigger,
-                f"/{self.drone_id}/start_capture",
-                self.handle_start_capture,
-            )
-            self.stop_capture_srv = self.create_service(
-                Trigger,
-                f"/{self.drone_id}/stop_capture",
-                self.handle_stop_capture,
-            )
             self.capture_srv = self.create_service(
                 Trigger,
                 f"/{self.drone_id}/capture_frame",
                 self.handle_capture,
             )
-            # service to handle all 3 service above
-            self.capture_one_shot_srv = self.create_service(
-                Trigger,
-                f"/{self.drone_id}/capture_frame_one_shot",
-                self.handle_capture_one_shot,
-            )
+            self.get_logger().info(f"Service created: /{self.drone_id}/capture_frame")
+
         except Exception as exp:
             self.get_logger().error(exp)
             raise exp
@@ -171,62 +167,10 @@ class ImageStateBuffer(Node):
             f"  capture:     initially OFF (no image/state subscriptions)"
         )
 
-        # Create clients for the services
-        try:
-            start_name = f"/{self.drone_id}/start_capture"
-            capture_name = f"/{self.drone_id}/capture_frame"
-            stop_name = f"/{self.drone_id}/stop_capture"
-
-            self.start_capture_cli = self.create_client(Trigger, start_name)
-            self.capture_frame_cli = self.create_client(Trigger, capture_name)
-            self.stop_capture_cli = self.create_client(Trigger, stop_name)
-
-            self.get_logger().info(
-                f"Waiting for capture services on {self.drone_id}: "
-                f"{start_name}, {capture_name}, {stop_name}"
-            )
-            for cli, name in [
-                (self.start_capture_cli, start_name),
-                (self.capture_frame_cli, capture_name),
-                (self.stop_capture_cli, stop_name),
-            ]:
-                if not cli.wait_for_service(timeout_sec=5.0):
-                    self.get_logger().warn(
-                        f"Service {name} not available yet (will still try on demand)."
-                    )
-        except Exception as exp:
-            self.get_logger().error(exp)
-
     # ------------------------------------------------------------------
     # Start/stop capture: create/destroy subscriptions
     # ------------------------------------------------------------------
 
-    def handle_start_capture(self, request: Trigger.Request, context) -> Trigger.Response:
-        resp = Trigger.Response()
-
-        if self.capture_enabled:
-            resp.success = True
-            resp.message = "Capture already enabled"
-            return resp
-
-        # Reset buffers
-        self.last_img_msg = None
-        self.last_state_msg = None
-
-        # Create subscriptions
-        self.image_sub = self.create_subscription(
-            Image, self.image_topic, self.image_cb, 10
-        )
-        self.state_sub = self.create_subscription(
-            UAVState, self.state_topic, self.state_cb, 10
-        )
-
-        self.capture_enabled = True
-        msg = "Capture enabled: image/state subscriptions created"
-        self.get_logger().info(msg)
-        resp.success = True
-        resp.message = msg
-        return resp
 
     def handle_stop_capture(self, request: Trigger.Request, context) -> Trigger.Response:
         resp = Trigger.Response()
@@ -246,49 +190,16 @@ class ImageStateBuffer(Node):
 
         self.capture_enabled = False
 
+        # Give the executor time to fully process the destruction signals.
+        time.sleep(0.1)
+        # -----------------------------------------------------------------
+
         # Optionally keep last_* or clear them; here we keep them
         msg = "Capture disabled: image/state subscriptions destroyed"
         self.get_logger().info(msg)
         resp.success = True
         resp.message = msg
         return resp
-
-    def handle_capture_one_shot(self, request: Trigger.Request, context) -> Trigger.Response:
-        """
-        One-shot service: internally calls
-        start_capture -> capture_frame -> stop_capture
-        on the ImageStateBuffer node for this drone_id.
-        """
-        resp = Trigger.Response()
-
-        # 1) start_capture
-        start_resp = self._call_trigger(self.start_capture_cli, "start_capture")
-        if not start_resp.success:
-            resp.success = False
-            resp.message = f"start_capture failed: {start_resp.message}"
-            return resp
-
-        time.sleep(0.3)
-
-        # 2) capture_frame
-        capture_resp = self._call_trigger(self.capture_frame_cli, "capture_frame")
-        stop_resp = self._call_trigger(self.stop_capture_cli, "stop_capture")
-
-        if not capture_resp.success:
-            resp.success = False
-            resp.message = (
-                f"capture_frame failed: {capture_resp.message}; "
-                f"stop_capture: {stop_resp.message}"
-            )
-            return resp
-
-        resp.success = True
-        resp.message = (
-            f"capture_frame_one_shot OK: {capture_resp.message}; "
-            f"stop_capture: {stop_resp.message}"
-        )
-        return resp
-
 
     def _call_trigger(self, client: rclpy.client.Client, name: str, timeout: float = 5.0) -> Trigger.Response:
         """
@@ -298,11 +209,25 @@ class ImageStateBuffer(Node):
         req = Trigger.Request()
         future = client.call_async(req)
 
+        # We rely on the parent executor (the one running the service callback)
+        # to spin until the future completes.
+        # rclpy.spin_until_future_complete(self, future, timeout_sec=timeout)
+
+        # Since we are already inside a callback on the MultiThreadedExecutor,
+        # we cannot call spin_until_future_complete on the node itself.
+        # This is likely where the contention/blocking is still happening
+        # despite the Reentrant group.
+
+        # Let's use the explicit spin_once loop instead, which is what ROS 2
+        # recommends for synchronous calls *inside* an executing thread.
         end_time = self.get_clock().now().nanoseconds * 1e-9 + timeout
-        while not future.done():
+        while rclpy.ok() and not future.done():
             now = self.get_clock().now().nanoseconds * 1e-9
             if now > end_time:
                 break
+
+            # Use spin_once explicitly on the current node to let the executor
+            # process the response on a different thread.
             rclpy.spin_once(self, timeout_sec=0.1)
 
         resp = Trigger.Response()
@@ -320,20 +245,19 @@ class ImageStateBuffer(Node):
             self.get_logger().error(resp.message)
         return resp
 
-
     # ------------------------------------------------------------------
     # Sub callbacks: keep latest messages in memory
     # ------------------------------------------------------------------
 
     def image_cb(self, img_msg: Image):
+        # Only keep the latest message
         self.last_img_msg = img_msg
-        msg = "New frame received"
-        self.get_logger().info(msg)
+        # self.get_logger().info("New frame received (buffered)") # Removed verbose logging
 
     def state_cb(self, state_msg: UAVState):
+        # Only keep the latest message
         self.last_state_msg = state_msg
-        msg = "State msg received"
-        self.get_logger().info(msg)
+        # self.get_logger().info("State msg received (buffered)") # Removed verbose logging
 
     def _azimuth_callback(self, msg: Float32):
         """Store the latest AprilTag-based azimuth."""
@@ -353,15 +277,14 @@ class ImageStateBuffer(Node):
         # Position-like fields
         if hasattr(state_msg, "position"):
             p = state_msg.position
-            pose["x"] = p.x #float(getattr(p, "x", 0.0))
-            pose["y"] = p.y #float(getattr(p, "y", 0.0))
-            pose["z"] = p.z #float(getattr(p, "z", 0.0))
+            pose["x"] = p.x  # float(getattr(p, "x", 0.0))
+            pose["y"] = p.y  # float(getattr(p, "y", 0.0))
+            pose["z"] = p.z  # float(getattr(p, "z", 0.0))
 
         # Heading-like field
         if hasattr(state_msg, "azimuth"):
             pose["yaw"] = float(state_msg.azimuth)
 
-        # Round to 5 digits like you asked
         for k, v in pose.items():
             pose[k] = round(float(v), 5)
 
@@ -475,7 +398,7 @@ class ImageStateBuffer(Node):
         return resp
 
     # ------------------------------------------------------------------
-    # Cleanup
+    # Cleanup (Subscriptions are destroyed in destroy_node, which is fine)
     # ------------------------------------------------------------------
     def destroy_node(self):
         if self.image_sub is not None:
@@ -487,7 +410,7 @@ class ImageStateBuffer(Node):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="On-demand capture: /<id>/start_capture, /<id>/stop_capture, /<id>/capture_frame."
+        description="On-demand capture: /<id>/capture_frame using continuous subscriptions."
     )
     parser.add_argument(
         "--drone-id",
@@ -545,8 +468,13 @@ def main():
 
     rclpy.init()
     node = ImageStateBuffer(args)
+
+    # Use MultiThreadedExecutor, although SingleThreadedExecutor would also work now.
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

@@ -13,7 +13,6 @@ x-common-settings: &compose-base
     - GID=125
     - CYCLONEDDS_URI=file:///etc/cyclonedds.xml
 
-
 services:
   build_ws:
     <<: *compose-base
