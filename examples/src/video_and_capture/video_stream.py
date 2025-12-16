@@ -9,6 +9,8 @@ from video_handler_interfaces.srv import SetVideoMode
 from std_msgs.msg import Bool
 from sensor_msgs.msg import Image, CameraInfo
 from builtin_interfaces.msg import Time
+from rclpy.qos import QoSProfile, qos_profile_sensor_data
+
 
 import numpy as np
 import cv2
@@ -56,15 +58,12 @@ class VideoStreamExample(Node):
         )
 
         self.image_pub = self.create_publisher(
-            Image, f"/{self.id}/camera/image_raw", 10
+            Image, f"/{self.id}/camera/image_raw", qos_profile_sensor_data
         )
         self.camera_info_pub = self.create_publisher(CameraInfo,
-                                                     f"/{self.id}/camera/camera_info", 10)
+                                                     f"/{self.id}/camera/camera_info", qos_profile_sensor_data)
 
         self.camera_info_template = None
-        self.camera_info_pub = self.create_publisher(
-            CameraInfo, f"/{self.id}/camera/camera_info", 10
-        )
 
 
         # ---- GStreamer pipeline with appsink ----

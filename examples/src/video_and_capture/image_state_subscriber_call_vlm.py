@@ -132,7 +132,7 @@ class ImageStateBuffer(Node):
 
         # Subscriptions (created/destroyed on demand)
         self.image_sub = self.create_subscription(
-            Image, self.image_topic, self.image_cb, 10)
+            Image, self.image_topic, self.image_cb, qos_profile_sensor_data)
         self.state_sub = self.create_subscription(
             UAVState, self.state_topic, self.state_cb, 10)
         self.capture_enabled = True  # Capture is always logically enabled
