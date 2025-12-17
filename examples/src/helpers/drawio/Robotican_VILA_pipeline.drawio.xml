@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36" version="29.2.7">
+  <diagram name="Selected-Frames Architecture" id="y-NUv17Vaz2I9UhDDD7S">
+    <mxGraphModel dx="1245" dy="638" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-1" parent="1" style="swimlane;horizontal=0;startSize=28;rounded=1;whiteSpace=wrap;html=1;fillColor=#d0cee2;strokeColor=#56517e;" value="DRONE" vertex="1">
+          <mxGeometry height="300" width="260" x="30" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-2" parent="yc5KSwSpvi2v20JNKNdx-1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="Camera" vertex="1">
+          <mxGeometry height="60" width="200" x="40" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-3" parent="yc5KSwSpvi2v20JNKNdx-1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="Video Stream&#xa;H264/RTP over UDP" vertex="1">
+          <mxGeometry height="70" width="200" x="40" y="110" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-4" parent="yc5KSwSpvi2v20JNKNdx-1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;strokeWidth=1;" value="ManualControl / FCU" vertex="1">
+          <mxGeometry height="60" width="200" x="40" y="205" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-23" edge="1" parent="yc5KSwSpvi2v20JNKNdx-1" source="yc5KSwSpvi2v20JNKNdx-2" style="endArrow=block;html=1;rounded=0;strokeWidth=2;" target="yc5KSwSpvi2v20JNKNdx-3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-5" parent="1" style="swimlane;horizontal=0;startSize=28;rounded=1;whiteSpace=wrap;html=1;fillColor=#d0cee2;strokeColor=#56517e;align=left;" value="&lt;div style=&quot;&quot;&gt;&lt;span style=&quot;background-color: transparent; color: light-dark(rgb(0, 0, 0), rgb(255, 255, 255));&quot;&gt;LAPTOP (ROS2 network edge)&lt;/span&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="540" width="540" x="310" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-6" parent="yc5KSwSpvi2v20JNKNdx-5" style="swimlane;horizontal=1;startSize=24;rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#aaaaaa;" value="Backend Docker (Laptop)" vertex="1">
+          <mxGeometry height="280" width="450" x="50" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-7" parent="yc5KSwSpvi2v20JNKNdx-6" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="GStreamer UDP Receiver / Decoder" vertex="1">
+          <mxGeometry height="60" width="120" x="20" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-8" parent="yc5KSwSpvi2v20JNKNdx-6" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;" value="Stream Manager" vertex="1">
+          <mxGeometry height="205" width="220" x="200" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-9" parent="yc5KSwSpvi2v20JNKNdx-6" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" value="Main Control Loop&#xa;ManualControl commands" vertex="1">
+          <mxGeometry height="110" width="140" x="10" y="140" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-10" edge="1" parent="yc5KSwSpvi2v20JNKNdx-6" source="yc5KSwSpvi2v20JNKNdx-7" style="endArrow=block;html=1;rounded=0;strokeWidth=2;entryX=0;entryY=0;entryDx=0;entryDy=0;edgeStyle=orthogonalEdgeStyle;exitX=0.5;exitY=0;exitDx=0;exitDy=0;" target="yc5KSwSpvi2v20JNKNdx-36">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="80" y="30" />
+              <mxPoint x="240" y="30" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-13" parent="yc5KSwSpvi2v20JNKNdx-6" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" value="Azimuth Calculator&amp;nbsp;" vertex="1">
+          <mxGeometry height="50" width="140" x="240" y="170" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-37" edge="1" parent="yc5KSwSpvi2v20JNKNdx-6" source="yc5KSwSpvi2v20JNKNdx-36" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="yc5KSwSpvi2v20JNKNdx-13" value="/camera_info">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-36" parent="yc5KSwSpvi2v20JNKNdx-6" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" value="ROS2 Publisher&lt;br&gt;/camera/image_raw + /camera/camera_info" vertex="1">
+          <mxGeometry height="50" width="140" x="240" y="90" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-11" parent="yc5KSwSpvi2v20JNKNdx-5" style="swimlane;horizontal=1;startSize=24;rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#aaaaaa;" value="Humble Docker (Laptop)" vertex="1">
+          <mxGeometry height="160" width="300" x="50" y="350" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-12" parent="yc5KSwSpvi2v20JNKNdx-11" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" value="AprilTag Node&#xa;(sub image + camera_info)" vertex="1">
+          <mxGeometry height="70" width="220" x="20" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-25" edge="1" parent="yc5KSwSpvi2v20JNKNdx-5" source="yc5KSwSpvi2v20JNKNdx-36" style="endArrow=block;html=1;rounded=0;strokeWidth=2;edgeStyle=orthogonalEdgeStyle;exitX=0;exitY=0.5;exitDx=0;exitDy=0;" target="yc5KSwSpvi2v20JNKNdx-12" value="/camera_info + &lt;br&gt;/image_raw">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="230" y="155" />
+              <mxPoint x="230" y="340" />
+              <mxPoint x="180" y="340" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-26" edge="1" parent="yc5KSwSpvi2v20JNKNdx-5" source="yc5KSwSpvi2v20JNKNdx-12" style="endArrow=block;html=1;rounded=0;strokeWidth=2;edgeStyle=orthogonalEdgeStyle;entryX=0.5;entryY=1;entryDx=0;entryDy=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" target="yc5KSwSpvi2v20JNKNdx-13" value="/tf">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="249.99833333333325" y="390" as="sourcePoint" />
+            <mxPoint x="392.4983333333333" y="210" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-16" parent="1" style="swimlane;horizontal=0;startSize=28;rounded=1;whiteSpace=wrap;html=1;fillColor=#d0cee2;strokeColor=#56517e;" value="JETSON AGX1" vertex="1">
+          <mxGeometry height="370" width="270" x="870" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-17" parent="yc5KSwSpvi2v20JNKNdx-16" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="Subscriber&#xa;/selected_frame" vertex="1">
+          <mxGeometry height="60" width="200" x="40" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-18" parent="yc5KSwSpvi2v20JNKNdx-16" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="Save Image to Disk" vertex="1">
+          <mxGeometry height="60" width="200" x="40" y="110" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-19" parent="yc5KSwSpvi2v20JNKNdx-16" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" value="VILA Pipeline&lt;br&gt;OWL + VILA" vertex="1">
+          <mxGeometry height="60" width="200" x="40" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-20" parent="yc5KSwSpvi2v20JNKNdx-16" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;" value="Results / Logs / Publish" vertex="1">
+          <mxGeometry height="60" width="200" x="40" y="280" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-21" edge="1" parent="yc5KSwSpvi2v20JNKNdx-16" source="yc5KSwSpvi2v20JNKNdx-17" style="endArrow=block;html=1;rounded=0;strokeWidth=2;" target="yc5KSwSpvi2v20JNKNdx-18">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-24" edge="1" parent="1" source="yc5KSwSpvi2v20JNKNdx-3" style="endArrow=block;html=1;rounded=0;strokeWidth=2;entryX=0;entryY=0.75;entryDx=0;entryDy=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" target="yc5KSwSpvi2v20JNKNdx-7" value="UDP">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-29" edge="1" parent="1" source="yc5KSwSpvi2v20JNKNdx-18" style="endArrow=block;html=1;rounded=0;strokeWidth=2;" target="yc5KSwSpvi2v20JNKNdx-19">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-30" edge="1" parent="1" source="yc5KSwSpvi2v20JNKNdx-19" style="endArrow=block;html=1;rounded=0;strokeWidth=2;" target="yc5KSwSpvi2v20JNKNdx-20">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-27" edge="1" parent="1" source="yc5KSwSpvi2v20JNKNdx-13" style="endArrow=block;html=1;rounded=0;strokeWidth=2;edgeStyle=orthogonalEdgeStyle;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="yc5KSwSpvi2v20JNKNdx-17" value="/selected_frame &lt;br&gt;+ /camera_azimuth">
+          <mxGeometry relative="1" x="0.2116" as="geometry">
+            <mxPoint as="offset" />
+            <Array as="points">
+              <mxPoint x="830" y="275" />
+              <mxPoint x="830" y="90" />
+            </Array>
+            <mxPoint x="960" y="400" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="yc5KSwSpvi2v20JNKNdx-41" edge="1" parent="1" source="yc5KSwSpvi2v20JNKNdx-9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;" target="yc5KSwSpvi2v20JNKNdx-4" value="/keepalive +&lt;br&gt;&amp;nbsp;/x,y,z,r">
+          <mxGeometry relative="1" y="15" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

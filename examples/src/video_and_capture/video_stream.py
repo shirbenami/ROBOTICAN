@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 import argparse
+import time
 
 import rclpy
 from rclpy.node import Node
 from rclpy.client import Client
 
 from video_handler_interfaces.srv import SetVideoMode
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32
 from sensor_msgs.msg import Image, CameraInfo
 from builtin_interfaces.msg import Time
 from rclpy.qos import QoSProfile, qos_profile_sensor_data
 
+import tf2_ros
+from tf2_ros import TransformException
 
 import numpy as np
 import cv2
@@ -37,34 +40,64 @@ class VideoStreamExample(Node):
         self.host = host_ip    # host IP "192.168.131.24" Laptop
         self.port = port
 
+        self.last_pub_time = 0  # in seconds, wall-clock time
+        self.pub_period = 0.5  # seconds between publishes
+
         # cv_bridge for publishing
         self.bridge = CvBridge()
+
+        # ---- ROS2: topic names ----
+        azimuth_topic = f"/{self.id}/camera_azimuth"
+        image_raw_topic = f"/{self.id}/camera/image_raw"
+        camera_info_topic = f"/{self.id}/camera/camera_info"
+        image_used_topic = f"/{self.id}/camera_image_used"
+        self.camera_frame = f"{self.id}_camera"
 
         # ---- ROS2: service + keep-alive ----
         self.set_video_mode_srv: Client = self.create_client(
             srv_type=SetVideoMode,
             srv_name=f"/{self.id}/video_handler/set_video_mode",
         )
-
+        # Keep Alive
         self.gcs_keep_alive_publisher = self.create_publisher(
             Bool, f"/{self.id}/gcs_keep_alive", 10
         )
         self.gcs_keep_alive_timer = self.create_timer(
             1.0, self.gcs_keep_alive_timer_callback
         )
-
+        # ROS2 Timer
         self.video_on_timer = self.create_timer(
             3.0, self.video_on_timer_callback
         )
 
+        # --- TF Setup ---
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+
+        # --- Publisher ---
         self.image_pub = self.create_publisher(
-            Image, f"/{self.id}/camera/image_raw", qos_profile_sensor_data
+            Image, image_raw_topic, qos_profile_sensor_data
         )
         self.camera_info_pub = self.create_publisher(CameraInfo,
-                                                     f"/{self.id}/camera/camera_info", qos_profile_sensor_data)
+                                                     camera_info_topic, qos_profile_sensor_data)
+        self.azimuth_pub = self.create_publisher(Float32, azimuth_topic, qos_profile_sensor_data)
+        self.image_used_pub = self.create_publisher(Image, image_used_topic, qos_profile_sensor_data)
+
 
         self.camera_info_template = None
+        self.awaiting_detection = False
+        self.last_frame_msg = None
+        self.last_yaw_deg = None
 
+        # Azimuth Parameters
+        self.tag_config = {
+            10: 0.0,  # North
+            11: 90.0,  # East
+            12: 180.0,  # South
+            13: 270.0,  # West
+        }
+        self.tag_family = "36h11"
+        self.known_tag_ids = list(self.tag_config.keys())
 
         # ---- GStreamer pipeline with appsink ----
         gst_pipeline = (
@@ -107,6 +140,11 @@ class VideoStreamExample(Node):
             self.get_logger().error("Failed to set GStreamer pipeline to PLAYING")
         else:
             self.get_logger().info("GStreamer pipeline set to PLAYING")
+
+        # --- Subscriptions to Azimuth node outputs ---
+        self.last_azimuth_deg = None
+        self.captured_count = 0
+        self.max_captures = 20
 
     # ---------- ROS2 timers ----------
 
@@ -161,7 +199,7 @@ class VideoStreamExample(Node):
     def on_new_sample(self, sink):
         """
         Called by GStreamer streaming thread whenever a new frame arrives.
-        We convert GstSample → numpy array (BGR) and hand it to process_frame().
+        Rate-limits publishing to at most 1 every self.pub_period seconds.
         """
         sample = sink.emit("pull-sample")
         if sample is None:
@@ -194,6 +232,11 @@ class VideoStreamExample(Node):
                 )
                 return Gst.FlowReturn.ERROR
 
+            # --- Rate limiting (wall time) ---
+            now = time.time()
+            if now - self.last_pub_time < self.pub_period:
+                return Gst.FlowReturn.OK  # skip this frame
+
             frame = np.frombuffer(data, dtype=np.uint8)
             try:
                 frame = frame.reshape((height, width, 3))
@@ -208,12 +251,13 @@ class VideoStreamExample(Node):
         finally:
             buf.unmap(map_info)
 
-        # now we can use the frame in our own code
+        # Only update last_pub_time **if** we publish!
+        self.last_pub_time = now
         self.process_frame(frame)
 
         return Gst.FlowReturn.OK
 
-    # ---------- your logic on each frame ----------
+    # ----------  logic on each frame ----------
 
     def process_frame(self, frame: np.ndarray):
         """
@@ -248,12 +292,19 @@ class VideoStreamExample(Node):
         ci.width = w
         ci.height = h
 
-
+        self.last_frame_msg = msg
         self.image_pub.publish(msg)
         self.camera_info_pub.publish(ci)
+        self.awaiting_detection = True
+
+        self.last_yaw_deg, tag_id = self.get_camera_yaw(msg.header.stamp)
+        self.get_logger().info(
+            f"Azimuth: {self.last_yaw_deg:.1f}° (Based on Tag {tag_id})")
+
+        self.frame_and_azimuth_publisher()
 
 
-    # CameraInfo creation:
+        # CameraInfo creation:
     def intrinsic_from_fov(self,  hfov_deg=130, vfov_deg=90, half_pixel=True):
         theta_x = np.deg2rad(hfov_deg)
         theta_y = np.deg2rad(vfov_deg)
@@ -333,6 +384,114 @@ class VideoStreamExample(Node):
         ]
 
         return msg
+
+    def frame_and_azimuth_publisher(self):
+        # Check if detection matches our last frame (by timestamp/frame_id)
+        if not self.awaiting_detection:
+            return
+        # TODO : FIX it
+        if not self.last_pub_time or self.header.stamp != self.last_pub_time:
+            return  # Not the detection for our framelast_frame_msg
+
+        self.image_used_pub.publish(self.last_frame_msg)
+        self.azimuth_pub.publish(self.last_azimuth_deg)
+        self.awaiting_detection = False  # Allow next frame to be published
+        self.last_frame_msg = None
+        self.last_yaw_deg = None
+
+    # -------------------------------------------------------------------------
+    # Core azimuth computation
+    # -------------------------------------------------------------------------
+    def get_camera_yaw(self, frame_timestamp):
+        """
+        Same API/name as your original code.
+
+        NEW:
+        - If we have an image stamp, we try lookup_transform using that stamp
+          to align azimuth to the latest frame.
+        - If no image received yet, falls back to latest TF (Time()).
+        """
+        last_error = None
+        best_tag_yaw_deg = None
+        best_tag_id = None
+
+        min_abs_relative_yaw = float("inf")
+
+        # Use image stamp if available; otherwise fallback to "latest"
+
+        query_time = frame_timestamp
+        if query_time is None:
+            query_time = rclpy.time.Time()
+            self.get_logger().warn("Got frame without timestamp.")
+
+        for tid in self.known_tag_ids:
+            # SAME candidate frame naming as your old code (no changes)
+            candidate_frames = [
+                f"tag{self.tag_family}:{tid}",
+                f"tag_{tid}",
+                f"tag{tid}",
+            ]
+
+            transform = None
+
+            for tag_frame in candidate_frames:
+                try:
+
+                    transform = self.tf_buffer.lookup_transform(
+                        self.camera_frame,
+                        tag_frame,
+                        query_time,
+                        timeout=rclpy.duration.Duration(seconds=0.05)
+                    )
+
+                    break
+                except TransformException as e:
+                    last_error = e
+                    continue
+
+            if transform:
+                t = transform.transform.translation
+
+                relative_yaw_rad = math.atan2(-t.x, t.z)
+                relative_yaw_deg = math.degrees(relative_yaw_rad)
+
+                abs_relative_yaw = abs(relative_yaw_deg)
+
+                if abs_relative_yaw < min_abs_relative_yaw:
+                    min_abs_relative_yaw = abs_relative_yaw
+
+                    wall_azimuth_deg = self.tag_config[tid]
+
+                    camera_yaw = wall_azimuth_deg + relative_yaw_deg
+                    camera_yaw = camera_yaw % 360.0
+
+                    best_tag_yaw_deg = camera_yaw
+                    best_tag_id = tid
+
+        if best_tag_yaw_deg is not None:
+            return best_tag_yaw_deg, best_tag_id
+
+        return None, last_error
+
+    def on_image_used(self, msg: Image):
+        """
+        Called ONLY when Azimuth node decided this is one of the 4 captures (0/90/180/270).
+        We pair it with the latest azimuth value.
+        """
+        if self.last_azimuth_deg is None:
+            self.get_logger().warn("Got camera_image_used but no azimuth yet. Skipping.")
+            return
+
+        self.captured_count += 1
+        self.get_logger().info(
+            f"[CAPTURE {self.captured_count}/{self.max_captures}] azimuth={self.last_azimuth_deg:.1f} deg, stamp={msg.header.stamp.sec}.{msg.header.stamp.nanosec}"
+        )
+
+        # Stop after 4 captures
+        if self.captured_count >= self.max_captures:
+            self.get_logger().info("Collected 4 captures. Stopping GStreamer pipeline.")
+            if hasattr(self, "pipeline") and self.pipeline is not None:
+                self.pipeline.set_state(Gst.State.NULL)
 
     # ---------- cleanup ----------
 

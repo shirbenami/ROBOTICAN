@@ -22,8 +22,6 @@ class PathRunnerNode(Node):
     - Publishes /<ROOSTER_ID>/manual_control at ~40 Hz during segments.
     - Publishes /<ROOSTER_ID>/keep_alive at ~1 Hz while running.
     - Reads path segments from a text file or from a hard-coded list.
-    - While the path is running, periodically calls /<ROOSTER_ID>/capture_frame_one_shot
-      via a timer (every capture_period seconds).
     """
 
     def __init__(
@@ -31,18 +29,13 @@ class PathRunnerNode(Node):
         rooster_id: str,
         flight_mode: int,
         turtle: bool = False,
-        capture_period: float = 1.0,
         arm_before_path: bool = True,
     ):
         super().__init__("path_runner")
 
         self.rooster_id = rooster_id
         self.flight_mode = int(flight_mode)
-        self.capture_period = float(capture_period)
         self.arm_before_path = bool(arm_before_path)
-
-        # Track when we should actually capture (only while path is running)
-        self.capture_enabled = False
 
         # Use same core model as GUI, but no logging.
         self.command_model = ManualCommandModel(step=10.0, turtle_scale=0.5)
@@ -51,23 +44,16 @@ class PathRunnerNode(Node):
 
         manual_topic = f"/{self.rooster_id}/manual_control"
         keep_alive_topic = f"/{self.rooster_id}/keep_alive"
-        capture_service_name = f"/{self.rooster_id}/capture_frame"
         arm_service_name = f"/{self.rooster_id}/fcu/command/force_arm"
 
 
         self.manual_pub = self.create_publisher(ManualControl, manual_topic, 10)
         self.keep_alive_pub = self.create_publisher(KeepAlive, keep_alive_topic, 10)
 
-        # Service client for image capture
-        self.capture_client = self.create_client(Trigger, capture_service_name)
 
         # Service client for arming
         self.force_arm_client = self.create_client(SetBool, arm_service_name)
 
-        # Timer to call capture service periodically (disabled logically by flag)
-        self.capture_timer = self.create_timer(
-            self.capture_period, self._capture_timer_cb
-        )
         self.last_uav_state = None
         self.uav_state_sub = self.create_subscription(
             UAVState,
@@ -76,19 +62,13 @@ class PathRunnerNode(Node):
             10,
         )
 
-        # Optional: to avoid log spam when service isn't ready
-        self._last_capture_warn_time = 0.0
-        self._capture_warn_interval = 0.5  # seconds
-
         self.get_logger().info(
             f"PathRunnerNode for {self.rooster_id} (flight_mode={self.flight_mode})"
         )
         self.get_logger().info(
             f"Publishing to: {manual_topic}, {keep_alive_topic}"
         )
-        self.get_logger().info(
-            f"Image capture service (timer): {capture_service_name}, period={self.capture_period}s"
-        )
+
         self.get_logger().info(
             f"Arm service: {arm_service_name}, arm_before_path={self.arm_before_path}"
         )
@@ -170,40 +150,6 @@ class PathRunnerNode(Node):
         )
         return False
 
-    # ---------- image capture via timer ----------
-
-    def _capture_timer_cb(self):
-        """
-        Timer callback that calls capture_frame_one_shot if capture is enabled.
-        """
-        if not self.capture_enabled:
-            return
-
-        if not self.capture_client.service_is_ready():
-            now = time.time()
-            if now - self._last_capture_warn_time > self._capture_warn_interval:
-                self.get_logger().warn(
-                    f"{self.rooster_id}: capture_frame_one_shot not ready yet."
-                )
-                self._last_capture_warn_time = now
-            return
-
-        req = Trigger.Request()
-        future = self.capture_client.call_async(req)
-
-        def _done_cb(fut: rclpy.client.Future):
-            try:
-                resp = fut.result()
-                self.get_logger().info(
-                    f"{self.rooster_id}: capture_frame_one_shot (timer) "
-                    f"success={resp.success}, msg='{resp.message}'"
-                )
-            except Exception as e:
-                self.get_logger().error(
-                    f"{self.rooster_id}: capture_frame_one_shot (timer) failed: {e}"
-                )
-
-        future.add_done_callback(_done_cb)
 
     def uav_state_callback(self, msg: UAVState):
         self.last_uav_state = msg
@@ -232,9 +178,6 @@ class PathRunnerNode(Node):
         self.get_logger().info(
             f"Starting path '{path_name}' with {len(segments)} segments."
         )
-
-        # Enable capture while the path is running
-        self.capture_enabled = True
 
         # Start with zero axes
         self.command_model.reset_axes()
@@ -280,9 +223,6 @@ class PathRunnerNode(Node):
                 self._send_manual()
                 rclpy.spin_once(self, timeout_sec=0.01)
                 time.sleep(0.02)
-
-        # Disable capture when done
-        self.capture_enabled = False
 
         # Zero at the end
         self.get_logger().info("Path finished, zeroing axes.")
@@ -376,13 +316,6 @@ def main():
         "--turtle", action="store_true", help="Enable turtle (slow) mode scaling"
     )
     parser.add_argument(
-        "--capture-period",
-        "-c",
-        type=float,
-        default=5.0,
-        help="Seconds between capture_frame_one_shot calls while path is running.",
-    )
-    parser.add_argument(
         "--no-arm",
         action="store_true",
         help="Do not call /<ROOSTER_ID>/fcu/command/arm before running the path.",
@@ -396,7 +329,6 @@ def main():
         rooster_id=args.rooster_id,
         flight_mode=args.flight_mode,
         turtle=args.turtle,
-        capture_period=args.capture_period,
         arm_before_path=not args.no_arm,
     )
     try:

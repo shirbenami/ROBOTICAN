@@ -3,6 +3,8 @@
 Minimal instructions to run the whole chain.
 
 ---
+## Architecture diagram
+![System diagram](helpers/drawio/robotican_vila_pipeline.drawio.png)
 
 ## 0. Environment (all machines)
 
