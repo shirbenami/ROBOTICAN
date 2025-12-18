@@ -5,6 +5,9 @@ import argparse
 from typing import Optional
 import datetime
 
+import requests
+import json
+
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
@@ -13,18 +16,14 @@ from rclpy.qos import qos_profile_sensor_data
 
 from concurrent.futures import ThreadPoolExecutor
 
-
-from sensor_msgs.msg import Image
-from std_msgs.msg import Float32
-from fcu_driver_interfaces.msg import UAVState
-
-from std_srvs.srv import Trigger
-
 from cv_bridge import CvBridge
-from txt_and_image_utils import _update_sidecar_json
+from sensor_msgs.msg import Image
+from geometry_msgs.msg import Point, PointStamped
+from std_srvs.srv import Trigger
+from message_filters import Subscriber, TimeSynchronizer
 
-import requests
-import json
+from fcu_driver_interfaces.msg import UAVState
+from txt_and_image_utils import _update_sidecar_json
 
 
 def _remap_path(local_path: str, src_root: Optional[str], dst_root: Optional[str]) -> str:
@@ -96,16 +95,10 @@ class ImageStateBuffer(Node):
     def __init__(self, args):
         super().__init__("image_state_buffer")
 
+        self.out_dir = None
         self.drone_id = args.drone_id
         self.pose_mode = getattr(args, "pose_mode", "state")
-        out_dir = os.path.abspath(args.out_dir)
-        unique_out_dir = datetime.datetime.now().strftime("%Y_%m_%d___%H_%M_%S")
-        self.out_dir = os.path.join(out_dir, unique_out_dir)
-        try:
-            print(f"out_dir: {self.out_dir}")
-            os.makedirs(self.out_dir, exist_ok=True)
-        except Exception as exp:
-            self.get_logger().error(exp)
+        self.base_dir = os.path.abspath(args.out_dir)
 
         self.bridge = CvBridge()
         self.reentrant_cb_group = ReentrantCallbackGroup()
@@ -118,7 +111,9 @@ class ImageStateBuffer(Node):
         self.vlm_path_dst: Optional[str] = args.vlm_path_dst
 
         # Topics
-        self.image_topic = f"/{self.drone_id}/camera/image_raw"
+        self.image_topic_name =  f"/{self.id}/selected_frame"
+        self.azimuth_topic_name = f"/{self.id}/camera_azimuth"
+
         self.state_topic = f"/{self.drone_id}/fcu/state"
 
         # Latest messages
@@ -131,75 +126,22 @@ class ImageStateBuffer(Node):
         self.sync_slop = 0.10  # 100 ms
 
         # Subscriptions (created/destroyed on demand)
-        self.image_sub = self.create_subscription(
-            Image, self.image_topic, self.image_cb, qos_profile_sensor_data)
+        self.image_sub = Subscriber(self, Image, self.image_topic_name, qos_profile=qos_profile_sensor_data)
+        self.azimuth_sub = Subscriber(self, PointStamped, self.azimuth_topic_name, qos_profile=qos_profile_sensor_data)
+
+        self.ts = TimeSynchronizer([self.image_sub, self.azimuth_sub], queue_size=10)
+        self.ts.registerCallback(self.sync_frame_and_azimuth)
+
         self.state_sub = self.create_subscription(
             UAVState, self.state_topic, self.state_cb, 10)
-        self.capture_enabled = True  # Capture is always logically enabled
-
-        # --- AprilTag azimuth subscriber ---
-        self.azimuth_value = None
-        azimuth_topic = f"/{self.drone_id}/camera_azimuth"
-        self.azimuth_sub = self.create_subscription(
-            Float32, azimuth_topic, self._azimuth_callback, 10
-        )
-        self.get_logger().info(f"Subscribed to AprilTag azimuth topic: {azimuth_topic}")
-
-        # Create services
-        try:
-            self.capture_srv = self.create_service(
-                Trigger,
-                f"/{self.drone_id}/capture_frame",
-                self.handle_capture,
-            )
-            self.get_logger().info(f"Service created: /{self.drone_id}/capture_frame")
-
-        except Exception as exp:
-            self.get_logger().error(exp)
-            raise exp
-
         self.get_logger().info(
             f"ImageStateBuffer started for {self.drone_id}\n"
             f"  image topic: {self.image_topic}\n"
             f"  state topic: {self.state_topic}\n"
-            f"  out_dir:     {self.out_dir}\n"
+            f"  base_dir:     {self.base_dir}\n"
             f"  VLM:         {self.vlm_endpoint or '(disabled)'}\n"
             f"  capture:     initially OFF (no image/state subscriptions)"
         )
-
-    # ------------------------------------------------------------------
-    # Start/stop capture: create/destroy subscriptions
-    # ------------------------------------------------------------------
-
-
-    def handle_stop_capture(self, request: Trigger.Request, context) -> Trigger.Response:
-        resp = Trigger.Response()
-
-        if not self.capture_enabled:
-            resp.success = True
-            resp.message = "Capture already disabled"
-            return resp
-
-        # Destroy subscriptions (this is what really stops DDS traffic)
-        if self.image_sub is not None:
-            self.destroy_subscription(self.image_sub)
-            self.image_sub = None
-        if self.state_sub is not None:
-            self.destroy_subscription(self.state_sub)
-            self.state_sub = None
-
-        self.capture_enabled = False
-
-        # Give the executor time to fully process the destruction signals.
-        time.sleep(0.1)
-        # -----------------------------------------------------------------
-
-        # Optionally keep last_* or clear them; here we keep them
-        msg = "Capture disabled: image/state subscriptions destroyed"
-        self.get_logger().info(msg)
-        resp.success = True
-        resp.message = msg
-        return resp
 
     def _call_trigger(self, client: rclpy.client.Client, name: str, timeout: float = 5.0) -> Trigger.Response:
         """
@@ -248,20 +190,11 @@ class ImageStateBuffer(Node):
     # ------------------------------------------------------------------
     # Sub callbacks: keep latest messages in memory
     # ------------------------------------------------------------------
-
-    def image_cb(self, img_msg: Image):
-        # Only keep the latest message
-        self.last_img_msg = img_msg
-        # self.get_logger().info("New frame received (buffered)") # Removed verbose logging
-
     def state_cb(self, state_msg: UAVState):
         # Only keep the latest message
         self.last_state_msg = state_msg
         # self.get_logger().info("State msg received (buffered)") # Removed verbose logging
 
-    def _azimuth_callback(self, msg: Float32):
-        """Store the latest AprilTag-based azimuth."""
-        self.azimuth_value = float(msg.data)
 
     # ------------------------------------------------------------------
     # Helper: extract pose dict from UAVState
@@ -293,53 +226,38 @@ class ImageStateBuffer(Node):
     # ------------------------------------------------------------------
     # Capture service: save one JPG+JSON (and VLM) from latest messages
     # ------------------------------------------------------------------
-    def handle_capture(self, request: Trigger.Request, context) -> Trigger.Response:
-        resp = Trigger.Response()
-
-        if not self.capture_enabled:
-            resp.success = False
-            resp.message = "Capture is disabled; call start_capture first"
-            return resp
-
-        if self.last_img_msg is None or self.last_state_msg is None:
-            resp.success = False
-            resp.message = "No image/state received yet"
-            return resp
-
-        img_msg = self.last_img_msg
-        state_msg = self.last_state_msg
-
-        # Check approximate sync
-        t_img = _stamp_to_sec(img_msg.header.stamp)
-        t_state = _stamp_to_sec(state_msg.header.stamp)
-        dt = abs(t_img - t_state)
-        if dt > self.sync_slop:
-            self.get_logger().warn(
-                f"Capture with unsynced pair: |t_img - t_state| = {dt:.3f}s "
-                f"(slop={self.sync_slop:.3f}s)"
-            )
-
+    def sync_frame_and_azimuth(self, img_msg: Image, azimuth_msg: PointStamped):
         try:
+            # Check approximate sync
+            t_img = _stamp_to_sec(img_msg.header.stamp)
+            t_state = _stamp_to_sec(self.last_state_msg.header.stamp)
+            dt = abs(t_img - t_state)
+            if dt > self.sync_slop:
+                self.get_logger().info(
+                    f"Capture with unsynced pair: |t_img - t_state| = {dt:.3f}s "
+                    f"(slop={self.sync_slop:.3f}s)"
+                )
+                pose = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
+            else:
+                state_msg = self.last_state_msg
+                pose = self.extract_pose_from_state(state_msg)
+
             cv_img = self.bridge.imgmsg_to_cv2(img_msg, desired_encoding="bgr8")
         except Exception as e:
             msg = f"Failed to convert image: {e}"
             self.get_logger().error(msg)
-            resp.success = False
-            resp.message = msg
-            return resp
-
-        pose = self.extract_pose_from_state(state_msg)
+            return
 
         # Optionally override yaw with AprilTag azimuth if available
-        if self.azimuth_value is not None:
-            pose["yaw"] = round(self.azimuth_value, 5)
+        pose["yaw"] = round(azimuth_msg.point.x, 5)
 
         # Use image ROS time for filename
         stamp = img_msg.header.stamp
         t_sec = _stamp_to_sec(stamp)
         ts_str = time.strftime("%Y%m%d_%H%M%S", time.localtime(t_sec))
         base_name = f"{self.drone_id}_{ts_str}"
-
+        unique_out_dir: str = azimuth_msg.header.frame_id
+        self.out_dir = os.path.join(self.base_dir, unique_out_dir)
         jpg_path = os.path.join(self.out_dir, base_name + ".jpg")
         json_path = os.path.join(self.out_dir, base_name + ".json")
         img_basename = os.path.basename(jpg_path)
@@ -351,9 +269,6 @@ class ImageStateBuffer(Node):
         except Exception as e:
             msg = f"Failed to save image {jpg_path}: {e}"
             self.get_logger().error(msg)
-            resp.success = False
-            resp.message = msg
-            return resp
 
         # First create/update JSON with pose and image name, no VLM yet
         _update_sidecar_json(json_path, pose, img_basename, vlm_text=None)
@@ -392,10 +307,6 @@ class ImageStateBuffer(Node):
         if vlm_caption:
             msg += " (with VLM caption)"
         self.get_logger().info(msg)
-
-        resp.success = True
-        resp.message = msg
-        return resp
 
     # ------------------------------------------------------------------
     # Cleanup (Subscriptions are destroyed in destroy_node, which is fine)

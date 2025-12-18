@@ -241,6 +241,3 @@ class TagBasedAzimuth(Node):
                         f"[CAPTURE] target={target:.0f}° | yaw={yaw_deg:.1f}° | tag={info} | mode={used_mode} | remaining={remaining}"
                     )
                     break
-
-        self.get_logger().info(
-            f"

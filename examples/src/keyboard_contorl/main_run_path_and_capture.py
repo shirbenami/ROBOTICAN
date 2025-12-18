@@ -45,6 +45,8 @@ class PathRunnerNode(Node):
         manual_topic = f"/{self.rooster_id}/manual_control"
         keep_alive_topic = f"/{self.rooster_id}/keep_alive"
         arm_service_name = f"/{self.rooster_id}/fcu/command/force_arm"
+        capture_start_service = f"/{self.rooster_id}/start_capture"
+
 
 
         self.manual_pub = self.create_publisher(ManualControl, manual_topic, 10)
@@ -53,6 +55,7 @@ class PathRunnerNode(Node):
 
         # Service client for arming
         self.force_arm_client = self.create_client(SetBool, arm_service_name)
+        self.start_capture_client = self.create_client(Trigger, capture_start_service)
 
         self.last_uav_state = None
         self.uav_state_sub = self.create_subscription(
@@ -154,6 +157,25 @@ class PathRunnerNode(Node):
     def uav_state_callback(self, msg: UAVState):
         self.last_uav_state = msg
 
+    def call_start_capture(self, timeout=5.0) -> bool:
+        self.get_logger().info(f"{self.rooster_id}: waiting for start_capture service...")
+        if not self.start_capture_client.wait_for_service(timeout_sec=timeout):
+            self.get_logger().error("start_capture service not available")
+            return False
+        req = Trigger.Request()
+        future = self.start_capture_client.call_async(req)
+        end_time = time.time() + timeout
+        while rclpy.ok() and not future.done() and time.time() < end_time:
+            rclpy.spin_once(self, timeout_sec=0.05)
+        if not future.done():
+            self.get_logger().error("start_capture timed out")
+            return False
+        resp = future.result()
+        self.get_logger().info(
+            f"{self.rooster_id}: start_capture response: success={resp.success}, msg='{resp.message}'"
+        )
+        return resp.success
+
     # ---------- high-level path execution ----------
 
     def run_path(
@@ -166,6 +188,12 @@ class PathRunnerNode(Node):
         """
         if not segments:
             self.get_logger().warn("Empty path, nothing to do.")
+            return
+
+        # Try to start capture before arming (or after, your choice)
+        ok = self.call_start_capture()
+        if not ok:
+            self.get_logger().error("Aborting path: failed to start image capture.")
             return
 
         # Try to arm before starting

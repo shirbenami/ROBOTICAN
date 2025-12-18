@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import datetime
 import time
 
 import rclpy
@@ -7,8 +8,9 @@ from rclpy.node import Node
 from rclpy.client import Client
 
 from video_handler_interfaces.srv import SetVideoMode
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool, Trigger
 from sensor_msgs.msg import Image, CameraInfo
+from geometry_msgs.msg import Point, PointStamped
 from builtin_interfaces.msg import Time
 from rclpy.qos import QoSProfile, qos_profile_sensor_data
 
@@ -30,7 +32,7 @@ from gi.repository import Gst, GstVideo
 Gst.init(None)
 
 
-class VideoStreamExample(Node):
+class VideoStreamManager(Node):
     def __init__(self, drone_id="R2", high_resolution=640, host_ip="192.168.131.24", port=5001):
         super().__init__("video_stream_example")
         self.id = drone_id
@@ -43,6 +45,13 @@ class VideoStreamExample(Node):
         self.last_pub_time = 0  # in seconds, wall-clock time
         self.pub_period = 0.5  # seconds between publishes
 
+        self.awaiting_detection = False
+        self.capturing_enabled = False
+        self.last_frame_msg = None
+        self.camera_info_template = None
+        self.dir_name = None
+
+
         # cv_bridge for publishing
         self.bridge = CvBridge()
 
@@ -50,7 +59,7 @@ class VideoStreamExample(Node):
         azimuth_topic = f"/{self.id}/camera_azimuth"
         image_raw_topic = f"/{self.id}/camera/image_raw"
         camera_info_topic = f"/{self.id}/camera/camera_info"
-        image_used_topic = f"/{self.id}/camera_image_used"
+        image_used_topic = f"/{self.id}/selected_frame"
         self.camera_frame = f"{self.id}_camera"
 
         # ---- ROS2: service + keep-alive ----
@@ -80,14 +89,15 @@ class VideoStreamExample(Node):
         )
         self.camera_info_pub = self.create_publisher(CameraInfo,
                                                      camera_info_topic, qos_profile_sensor_data)
-        self.azimuth_pub = self.create_publisher(Float32, azimuth_topic, qos_profile_sensor_data)
+        self.azimuth_pub = self.create_publisher(PointStamped, azimuth_topic, qos_profile_sensor_data)
         self.image_used_pub = self.create_publisher(Image, image_used_topic, qos_profile_sensor_data)
 
+        # --- Services
+        self.create_service(Trigger, f"/{self.id}/start_capture", self.handle_start_capture)
+        self.create_service(Trigger, f"/{self.id}/stop_capture", self.handle_stop_capture)
 
-        self.camera_info_template = None
-        self.awaiting_detection = False
-        self.last_frame_msg = None
-        self.last_yaw_deg = None
+
+
 
         # Azimuth Parameters
         self.tag_config = {
@@ -190,6 +200,23 @@ class VideoStreamExample(Node):
 
         future.add_done_callback(set_video_mode_cb)
 
+    def handle_start_capture(self, request, context):
+        self.capturing_enabled = True
+        self.dir_name = datetime.datetime.now().strftime("%Y_%m_%d___%H_%M_%S")
+        self.get_logger().info("Capture ENABLED by service call")
+        resp = Trigger.Response()
+        resp.success = True
+        resp.message = "Started capturing"
+        return resp
+
+    def handle_stop_capture(self, request, context):
+        self.capturing_enabled = False
+        self.get_logger().info("Capture DISABLED by service call")
+        resp = Trigger.Response()
+        resp.success = True
+        resp.message = "Stopped capturing"
+        return resp
+
     # ---------- GStreamer callbacks ----------
 
     def on_gst_error(self, bus, msg):
@@ -232,6 +259,9 @@ class VideoStreamExample(Node):
                 )
                 return Gst.FlowReturn.ERROR
 
+            # Only publish if capturing enabled!
+            if not self.capturing_enabled:
+                return Gst.FlowReturn.OK
             # --- Rate limiting (wall time) ---
             now = time.time()
             if now - self.last_pub_time < self.pub_period:
@@ -282,7 +312,7 @@ class VideoStreamExample(Node):
 
         # ROS2 publish
         msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
-        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.stamp = self.last_pub_time
         msg.header.frame_id = f"{self.id}_camera"
 
         ci = copy.deepcopy(self.camera_info_template)
@@ -297,12 +327,24 @@ class VideoStreamExample(Node):
         self.camera_info_pub.publish(ci)
         self.awaiting_detection = True
 
-        self.last_yaw_deg, tag_id = self.get_camera_yaw(msg.header.stamp)
-        self.get_logger().info(
-            f"Azimuth: {self.last_yaw_deg:.1f}° (Based on Tag {tag_id})")
+        last_yaw_deg, tag_id = self.get_camera_yaw(msg.header.stamp)
+        if last_yaw_deg is None:
+            self.get_logger().warn(
+                f"No tags visible. Last TF error: {tag_id}")
+            azimuth_msg = PointStamped()
+            azimuth_msg.header.stamp = None
+        else:
+            azimuth_value_msg = Point()
+            azimuth_msg = PointStamped()
+            azimuth_value_msg.x = float(last_yaw_deg)
+            azimuth_value_msg.y = float(tag_id)
+            azimuth_msg.header.stamp = msg.header.stamp
+            azimuth_msg.header.frame_id = self.dir_name
+            azimuth_msg.point = azimuth_value_msg
+            self.get_logger().info(
+                f"Azimuth: {last_yaw_deg:.1f}° (Based on Tag {tag_id})")
 
-        self.frame_and_azimuth_publisher()
-
+        self.frame_and_azimuth_publisher(azimuth_msg)
 
         # CameraInfo creation:
     def intrinsic_from_fov(self,  hfov_deg=130, vfov_deg=90, half_pixel=True):
@@ -385,19 +427,17 @@ class VideoStreamExample(Node):
 
         return msg
 
-    def frame_and_azimuth_publisher(self):
-        # Check if detection matches our last frame (by timestamp/frame_id)
+    def frame_and_azimuth_publisher(self, azimuth_msg):
         if not self.awaiting_detection:
             return
-        # TODO : FIX it
-        if not self.last_pub_time or self.header.stamp != self.last_pub_time:
-            return  # Not the detection for our framelast_frame_msg
+        if not self.last_pub_time or azimuth_msg.header.stamp != self.last_pub_time:
+            return  # Not the detection for our last_frame_msg
+
 
         self.image_used_pub.publish(self.last_frame_msg)
-        self.azimuth_pub.publish(self.last_azimuth_deg)
+        self.azimuth_pub.publish(azimuth_msg)
         self.awaiting_detection = False  # Allow next frame to be published
         self.last_frame_msg = None
-        self.last_yaw_deg = None
 
     # -------------------------------------------------------------------------
     # Core azimuth computation
@@ -473,26 +513,6 @@ class VideoStreamExample(Node):
 
         return None, last_error
 
-    def on_image_used(self, msg: Image):
-        """
-        Called ONLY when Azimuth node decided this is one of the 4 captures (0/90/180/270).
-        We pair it with the latest azimuth value.
-        """
-        if self.last_azimuth_deg is None:
-            self.get_logger().warn("Got camera_image_used but no azimuth yet. Skipping.")
-            return
-
-        self.captured_count += 1
-        self.get_logger().info(
-            f"[CAPTURE {self.captured_count}/{self.max_captures}] azimuth={self.last_azimuth_deg:.1f} deg, stamp={msg.header.stamp.sec}.{msg.header.stamp.nanosec}"
-        )
-
-        # Stop after 4 captures
-        if self.captured_count >= self.max_captures:
-            self.get_logger().info("Collected 4 captures. Stopping GStreamer pipeline.")
-            if hasattr(self, "pipeline") and self.pipeline is not None:
-                self.pipeline.set_state(Gst.State.NULL)
-
     # ---------- cleanup ----------
 
     def destroy_node(self):
@@ -511,7 +531,7 @@ def main(args=None):
     parsed = parser.parse_args()
 
     rclpy.init(args=args)
-    node = VideoStreamExample(
+    node = VideoStreamManager(
         drone_id=parsed.drone_id,
         high_resolution=parsed.width,
         host_ip=parsed.host_ip,
