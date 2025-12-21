@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 import argparse
 import datetime
+import threading
 import time
 
 import rclpy
 from rclpy.node import Node
 from rclpy.client import Client
+from rclpy.duration import Duration
 
 from video_handler_interfaces.srv import SetVideoMode
-from std_msgs.msg import Bool, Trigger
+from std_msgs.msg import Bool
+from std_srvs.srv import Trigger
+
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import Point, PointStamped
 from builtin_interfaces.msg import Time
@@ -23,6 +27,7 @@ from cv_bridge import CvBridge
 import copy
 import math
 from typing import Iterable, Optional
+import zlib
 
 import gi
 gi.require_version("Gst", "1.0")
@@ -41,16 +46,21 @@ class VideoStreamManager(Node):
         self.height = int(self.width * 9 / 16)
         self.host = host_ip    # host IP "192.168.131.24" Laptop
         self.port = port
+        self.stream_timeout_s = 1.5
 
-        self.last_pub_time = 0  # in seconds, wall-clock time
-        self.pub_period = 0.5  # seconds between publishes
+        self.last_pub_time = self.get_clock().now()  # in seconds, wall-clock time
+        self.pub_period = Duration(seconds=0.5)  # seconds between publishes
 
-        self.awaiting_detection = False
         self.capturing_enabled = False
-        self.last_frame_msg = None
         self.camera_info_template = None
-        self.dir_name = None
+        self.dir_name = datetime.datetime.now().strftime("%Y_%m_%d___%H_%M_%S")
+        self.last_frame_np = None
+        self.last_sample_time = None
 
+
+        self.latest_frame = None
+        self.latest_lock = threading.Lock()
+        self.pub_timer = self.create_timer(1.0, self.on_pub_timer)
 
         # cv_bridge for publishing
         self.bridge = CvBridge()
@@ -89,7 +99,7 @@ class VideoStreamManager(Node):
         )
         self.camera_info_pub = self.create_publisher(CameraInfo,
                                                      camera_info_topic, qos_profile_sensor_data)
-        self.azimuth_pub = self.create_publisher(PointStamped, azimuth_topic, qos_profile_sensor_data)
+        # self.azimuth_pub = self.create_publisher(PointStamped, azimuth_topic, qos_profile_sensor_data)
         self.image_used_pub = self.create_publisher(Image, image_used_topic, qos_profile_sensor_data)
 
         # --- Services
@@ -111,15 +121,14 @@ class VideoStreamManager(Node):
 
         # ---- GStreamer pipeline with appsink ----
         gst_pipeline = (
-            f"udpsrc port={self.port} "
-            "caps=application/x-rtp,media=(string)video,clock-rate=(int)90000,"
-            "encoding-name=(string)H264,payload=(int)96 ! "
+            f"udpsrc port={self.port} buffer-size=5242880 do-timestamp=true "
+            "caps=application/x-rtp,media=video,clock-rate=90000,encoding-name=H264,payload=96 ! "
+            "rtpjitterbuffer latency=100 drop-on-latency=true ! "
             "rtph264depay ! "
+            "queue leaky=downstream max-size-buffers=1 ! "
             "decodebin ! "
-            "videoconvert ! "
-           # "videocrop name=cropper top=42 left=1 right=4 bottom=0 ! "
-            "video/x-raw,format=BGR ! "
-            "appsink name=mysink emit-signals=true sync=false max-buffers=1 drop=true"
+            "videoconvert ! video/x-raw,format=BGR ! "
+            "appsink name=mysink emit-signals=true sync=false max-buffers=1 drop=true enable-last-sample=false"
         )
 
         self.get_logger().info(f"Creating GStreamer pipeline:\n{gst_pipeline}")
@@ -259,12 +268,8 @@ class VideoStreamManager(Node):
                 )
                 return Gst.FlowReturn.ERROR
 
-            # Only publish if capturing enabled!
-            if not self.capturing_enabled:
-                return Gst.FlowReturn.OK
-            # --- Rate limiting (wall time) ---
-            now = time.time()
-            if now - self.last_pub_time < self.pub_period:
+            now = self.get_clock().now()
+            if (now - self.last_pub_time) < self.pub_period:
                 return Gst.FlowReturn.OK  # skip this frame
 
             frame = np.frombuffer(data, dtype=np.uint8)
@@ -274,6 +279,8 @@ class VideoStreamManager(Node):
                 self.get_logger().error(
                     f"Reshape failed for frame {height}x{width}: {e}"
                 )
+            except Exception as e:
+                self.get_logger().error(f"Exception is: {e}")
                 return Gst.FlowReturn.ERROR
 
             frame = frame.copy()  # detach from Gst buffer
@@ -281,21 +288,37 @@ class VideoStreamManager(Node):
         finally:
             buf.unmap(map_info)
 
-        # Only update last_pub_time **if** we publish!
-        self.last_pub_time = now
-        self.process_frame(frame)
-
+        with self.latest_lock:
+            self.latest_frame = frame
+            self.last_sample_time = time.monotonic()
         return Gst.FlowReturn.OK
 
     # ----------  logic on each frame ----------
+    def on_pub_timer(self):
+        if not self.capturing_enabled:
+            return
+        if self.last_sample_time is None:
+            return
+        if (time.monotonic() - self.last_sample_time) > self.stream_timeout_s:
+            self.get_logger().warn("Stream stale (no UDP frames). Not publishing.")
+            return
+        with self.latest_lock:
+            if self.latest_frame is None:
+                return
+            frame = self.latest_frame.copy()
 
-    def process_frame(self, frame: np.ndarray):
+        now = self.get_clock().now()
+        self.process_frame(frame, now)  # TF lookup is here (safe)
+
+    def process_frame(self, frame: np.ndarray, now):
         """
         frame is a numpy array, shape (H, W, 3), BGR.
         """
+
         h, w, _ = frame.shape
+        stamp_msg = now.to_msg()
         self.i += 1
-        
+
         # Build CameraInfo template once, when we see the first frame
         if self.camera_info_template is None:
             # Use the camera frame id you actually publish on images
@@ -303,7 +326,7 @@ class VideoStreamManager(Node):
                 frame_id=f"{self.id}_camera"
             )
         # occasional debug
-        if self.i % 500 == 1:
+        if self.i % 5 == 1:
             self.get_logger().info(f"Frame #{self.i}: {w}x{h}")
 
         # Optional: save a frame every 100 frames
@@ -312,8 +335,11 @@ class VideoStreamManager(Node):
 
         # ROS2 publish
         msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
-        msg.header.stamp = self.last_pub_time
+        # self.last_frame_np = frame
+        msg.header.stamp = stamp_msg
         msg.header.frame_id = f"{self.id}_camera"
+
+        self.last_frame_np = frame.copy()
 
         ci = copy.deepcopy(self.camera_info_template)
         # Update header + size (in case the actual frame size differs)
@@ -322,29 +348,34 @@ class VideoStreamManager(Node):
         ci.width = w
         ci.height = h
 
-        self.last_frame_msg = msg
         self.image_pub.publish(msg)
         self.camera_info_pub.publish(ci)
-        self.awaiting_detection = True
 
-        last_yaw_deg, tag_id = self.get_camera_yaw(msg.header.stamp)
+        last_yaw_deg, tag_id = self.get_camera_yaw(query_time=rclpy.time.Time())
+        # azimuth_value_msg = Point()
+        # azimuth_msg = PointStamped()
+        #
+        # # Build azimuth msg ALWAYS stamped
+        # azimuth_msg.header.stamp = stamp_msg
+        # azimuth_msg.header.frame_id = self.dir_name  # keep this always
+        # if last_yaw_deg is None:
+        #     self.get_logger().warn(
+        #         f"No tags visible. Last TF error: {tag_id}")
+        #     azimuth_msg.point.x = float("nan")  # or -999.0
+        #     azimuth_msg.point.y = -1.0  # tag_id sentinel
+        #
+        # else:
+        #     azimuth_value_msg.x = float(last_yaw_deg)
+        #     azimuth_value_msg.y = float(tag_id)
+        #     azimuth_msg.point = azimuth_value_msg
+        #     self.get_logger().info(
+        #         f"Azimuth: {last_yaw_deg:.1f}° (Based on Tag {tag_id})")
         if last_yaw_deg is None:
-            self.get_logger().warn(
-                f"No tags visible. Last TF error: {tag_id}")
-            azimuth_msg = PointStamped()
-            azimuth_msg.header.stamp = None
-        else:
-            azimuth_value_msg = Point()
-            azimuth_msg = PointStamped()
-            azimuth_value_msg.x = float(last_yaw_deg)
-            azimuth_value_msg.y = float(tag_id)
-            azimuth_msg.header.stamp = msg.header.stamp
-            azimuth_msg.header.frame_id = self.dir_name
-            azimuth_msg.point = azimuth_value_msg
-            self.get_logger().info(
-                f"Azimuth: {last_yaw_deg:.1f}° (Based on Tag {tag_id})")
-
-        self.frame_and_azimuth_publisher(azimuth_msg)
+            self.get_logger().warn(f"Failed to get camera yaw from tag_id = {tag_id}")
+            return
+        msg.header.frame_id = self.dir_name +'_____' + str(last_yaw_deg)
+        self.image_used_pub.publish(msg)
+        # self.azimuth_pub.publish(azimuth_msg)
 
         # CameraInfo creation:
     def intrinsic_from_fov(self,  hfov_deg=130, vfov_deg=90, half_pixel=True):
@@ -427,22 +458,10 @@ class VideoStreamManager(Node):
 
         return msg
 
-    def frame_and_azimuth_publisher(self, azimuth_msg):
-        if not self.awaiting_detection:
-            return
-        if not self.last_pub_time or azimuth_msg.header.stamp != self.last_pub_time:
-            return  # Not the detection for our last_frame_msg
-
-
-        self.image_used_pub.publish(self.last_frame_msg)
-        self.azimuth_pub.publish(azimuth_msg)
-        self.awaiting_detection = False  # Allow next frame to be published
-        self.last_frame_msg = None
-
     # -------------------------------------------------------------------------
     # Core azimuth computation
     # -------------------------------------------------------------------------
-    def get_camera_yaw(self, frame_timestamp):
+    def get_camera_yaw(self, query_time):
         """
         Same API/name as your original code.
 
@@ -458,11 +477,6 @@ class VideoStreamManager(Node):
         min_abs_relative_yaw = float("inf")
 
         # Use image stamp if available; otherwise fallback to "latest"
-
-        query_time = frame_timestamp
-        if query_time is None:
-            query_time = rclpy.time.Time()
-            self.get_logger().warn("Got frame without timestamp.")
 
         for tid in self.known_tag_ids:
             # SAME candidate frame naming as your old code (no changes)

@@ -46,6 +46,7 @@ class PathRunnerNode(Node):
         keep_alive_topic = f"/{self.rooster_id}/keep_alive"
         arm_service_name = f"/{self.rooster_id}/fcu/command/force_arm"
         capture_start_service = f"/{self.rooster_id}/start_capture"
+        capture_stop_service = f"/{self.rooster_id}/stop_capture"
 
 
 
@@ -56,6 +57,7 @@ class PathRunnerNode(Node):
         # Service client for arming
         self.force_arm_client = self.create_client(SetBool, arm_service_name)
         self.start_capture_client = self.create_client(Trigger, capture_start_service)
+        self.stop_capture_client = self.create_client(Trigger, capture_stop_service)
 
         self.last_uav_state = None
         self.uav_state_sub = self.create_subscription(
@@ -157,22 +159,22 @@ class PathRunnerNode(Node):
     def uav_state_callback(self, msg: UAVState):
         self.last_uav_state = msg
 
-    def call_start_capture(self, timeout=5.0) -> bool:
-        self.get_logger().info(f"{self.rooster_id}: waiting for start_capture service...")
-        if not self.start_capture_client.wait_for_service(timeout_sec=timeout):
-            self.get_logger().error("start_capture service not available")
+    def call_service_capture(self, service_client, timeout=5.0) -> bool:
+        self.get_logger().info(f"{self.rooster_id}: waiting for {service_client.srv_name} service...")
+        if not service_client.wait_for_service(timeout_sec=timeout):
+            self.get_logger().error(f"{service_client.srv_name} service not available")
             return False
         req = Trigger.Request()
-        future = self.start_capture_client.call_async(req)
+        future = service_client.call_async(req)
         end_time = time.time() + timeout
         while rclpy.ok() and not future.done() and time.time() < end_time:
             rclpy.spin_once(self, timeout_sec=0.05)
         if not future.done():
-            self.get_logger().error("start_capture timed out")
+            self.get_logger().error(f"{service_client.srv_name} timed out")
             return False
         resp = future.result()
         self.get_logger().info(
-            f"{self.rooster_id}: start_capture response: success={resp.success}, msg='{resp.message}'"
+            f"{self.rooster_id}: {service_client.srv_name} response: success={resp.success}, msg='{resp.message}'"
         )
         return resp.success
 
@@ -191,7 +193,7 @@ class PathRunnerNode(Node):
             return
 
         # Try to start capture before arming (or after, your choice)
-        ok = self.call_start_capture()
+        ok = self.call_service_capture(service_client=self.start_capture_client)
         if not ok:
             self.get_logger().error("Aborting path: failed to start image capture.")
             return
@@ -200,6 +202,7 @@ class PathRunnerNode(Node):
         if self.arm_before_path:
             ok = self.try_arm_drone()
             if not ok:
+                self.call_service_capture(service_client=self.stop_capture_client)
                 self.get_logger().error("Aborting path: failed to arm drone.")
                 return
 
@@ -255,6 +258,7 @@ class PathRunnerNode(Node):
         # Zero at the end
         self.get_logger().info("Path finished, zeroing axes.")
         self.command_model.reset_axes()
+        self.call_service_capture(service_client=self.stop_capture_client)
         for _ in range(20):
             self._send_manual()
             if time.time() - last_keep_alive > 1.0:

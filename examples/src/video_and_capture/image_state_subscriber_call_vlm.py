@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 import os
 import time
+import queue, threading
 import argparse
 from typing import Optional
-import datetime
 
 import requests
 import json
+
 
 import rclpy
 from rclpy.node import Node
@@ -19,7 +20,6 @@ from concurrent.futures import ThreadPoolExecutor
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Point, PointStamped
-from std_srvs.srv import Trigger
 from message_filters import Subscriber, TimeSynchronizer
 
 from fcu_driver_interfaces.msg import UAVState
@@ -77,19 +77,6 @@ class ImageStateBuffer(Node):
     - When idle (default): no subscription to image/state -> no image traffic
       from the other machine.
 
-    - Service: /<drone_id>/start_capture (Trigger)
-        * Creates subscriptions to:
-          /<drone_id>/camera/image_raw
-          /<drone_id>/fcu/state
-        * Starts buffering the latest messages.
-
-    - Service: /<drone_id>/stop_capture (Trigger)
-        * Destroys those subscriptions, stops the traffic.
-
-    - Service: /<drone_id>/capture_frame (Trigger)
-        * Uses the latest image + state in memory.
-        * Saves <id>_YYYYmmdd_HHMMSS.jpg + .json
-        * Optionally calls VLM and stores caption in json.
     """
 
     def __init__(self, args):
@@ -111,81 +98,39 @@ class ImageStateBuffer(Node):
         self.vlm_path_dst: Optional[str] = args.vlm_path_dst
 
         # Topics
-        self.image_topic_name =  f"/{self.id}/selected_frame"
-        self.azimuth_topic_name = f"/{self.id}/camera_azimuth"
+        self.image_topic_name =  f"/{self.drone_id}/selected_frame"
 
-        self.state_topic = f"/{self.drone_id}/fcu/state"
+        self.state_topic_name = f"/{self.drone_id}/fcu/state"
 
         # Latest messages
         self.last_img_msg: Optional[Image] = None
         self.last_state_msg: Optional[UAVState] = None
+        self._last_img_stamp = None  # tuple(sec, nanosec)
+        self._same_frame_hits = 0
+        self._freeze_warn_every = 30  # log every N repeats
 
         self.executor_pool = ThreadPoolExecutor(max_workers=2)
+        self._vlm_q = queue.Queue(maxsize=1)
+        self._vlm_stop = threading.Event()
+        self._vlm_thread = threading.Thread(target=self._vlm_worker_loop, daemon=True)
+        self._vlm_thread.start()
 
         # Approx sync tolerance (seconds)
         self.sync_slop = 0.10  # 100 ms
 
         # Subscriptions (created/destroyed on demand)
-        self.image_sub = Subscriber(self, Image, self.image_topic_name, qos_profile=qos_profile_sensor_data)
-        self.azimuth_sub = Subscriber(self, PointStamped, self.azimuth_topic_name, qos_profile=qos_profile_sensor_data)
-
-        self.ts = TimeSynchronizer([self.image_sub, self.azimuth_sub], queue_size=10)
-        self.ts.registerCallback(self.sync_frame_and_azimuth)
-
+        self.image_sub = self.create_subscription(
+            Image, self.image_topic_name, self.image_cb, qos_profile_sensor_data)
         self.state_sub = self.create_subscription(
-            UAVState, self.state_topic, self.state_cb, 10)
+            UAVState, self.state_topic_name, self.state_cb, 10)
         self.get_logger().info(
             f"ImageStateBuffer started for {self.drone_id}\n"
-            f"  image topic: {self.image_topic}\n"
-            f"  state topic: {self.state_topic}\n"
+            f"  image topic: {self.image_topic_name}\n"
+            f"  state topic: {self.state_topic_name}\n"
             f"  base_dir:     {self.base_dir}\n"
             f"  VLM:         {self.vlm_endpoint or '(disabled)'}\n"
             f"  capture:     initially OFF (no image/state subscriptions)"
         )
-
-    def _call_trigger(self, client: rclpy.client.Client, name: str, timeout: float = 5.0) -> Trigger.Response:
-        """
-        Helper: call a std_srvs/Trigger service synchronously
-        and return its response (or a fake-failed response on error).
-        """
-        req = Trigger.Request()
-        future = client.call_async(req)
-
-        # We rely on the parent executor (the one running the service callback)
-        # to spin until the future completes.
-        # rclpy.spin_until_future_complete(self, future, timeout_sec=timeout)
-
-        # Since we are already inside a callback on the MultiThreadedExecutor,
-        # we cannot call spin_until_future_complete on the node itself.
-        # This is likely where the contention/blocking is still happening
-        # despite the Reentrant group.
-
-        # Let's use the explicit spin_once loop instead, which is what ROS 2
-        # recommends for synchronous calls *inside* an executing thread.
-        end_time = self.get_clock().now().nanoseconds * 1e-9 + timeout
-        while rclpy.ok() and not future.done():
-            now = self.get_clock().now().nanoseconds * 1e-9
-            if now > end_time:
-                break
-
-            # Use spin_once explicitly on the current node to let the executor
-            # process the response on a different thread.
-            rclpy.spin_once(self, timeout_sec=0.1)
-
-        resp = Trigger.Response()
-        if not future.done():
-            resp.success = False
-            resp.message = f"{name}: timeout after {timeout:.1f}s"
-            self.get_logger().warn(resp.message)
-            return resp
-
-        try:
-            resp = future.result()
-        except Exception as e:
-            resp.success = False
-            resp.message = f"{name}: exception {e}"
-            self.get_logger().error(resp.message)
-        return resp
 
     # ------------------------------------------------------------------
     # Sub callbacks: keep latest messages in memory
@@ -199,7 +144,8 @@ class ImageStateBuffer(Node):
     # ------------------------------------------------------------------
     # Helper: extract pose dict from UAVState
     # ------------------------------------------------------------------
-    def extract_pose_from_state(self, state_msg: UAVState) -> dict:
+    @staticmethod
+    def extract_pose_from_state(state_msg: UAVState) -> dict:
         """
         Best-effort extraction of {x,y,z,yaw} from UAVState.
 
@@ -223,41 +169,130 @@ class ImageStateBuffer(Node):
 
         return pose
 
+    @staticmethod
+    def parse_frame_id( frame_id: str):
+        """
+        Expected format:
+          "<out_dir>_____ <azimuth>"
+        Example:
+          "2025_12_21___15_30_49_____95.18695746993248"
+        Returns: (out_dir: str, azimuth: float) or (frame_id, None) if not parseable
+        """
+        if not frame_id:
+            return "", None
+
+        sep = "_____"
+        if sep not in frame_id:
+            return frame_id, None
+
+        left, right = frame_id.split(sep, 1)
+        out_dir = left.strip()
+        az_str = right.strip()
+
+        try:
+            az = float(az_str)
+        except ValueError:
+            az = None
+
+        return out_dir, az
+
+    def _vlm_job(self, img_for_vlm: str, json_path: str, pose: dict, img_basename: str):
+        try:
+            self.get_logger().info(f"[vlm] POST {self.vlm_endpoint} image_path={img_for_vlm}")
+            caption = _call_vlm(
+                self.vlm_endpoint,
+                img_for_vlm,
+                timeout=self.vlm_timeout,
+                retries=self.vlm_retries,
+            )
+            _update_sidecar_json(
+                json_path,
+                pose,
+                img_basename,
+                vlm_text=caption,
+            )
+            if caption:
+                short = caption[:120] + ("…" if len(caption) > 120 else "")
+                self.get_logger().info(f"[vlm] done: {os.path.basename(json_path)} caption: {short}")
+            else:
+                self.get_logger().warn(f"[vlm] done: {os.path.basename(json_path)} no caption")
+        except Exception as e:
+            self.get_logger().error(f"[vlm] job failed for {json_path}: {e}")
+
+    def _vlm_worker_loop(self):
+        while not self._vlm_stop.is_set():
+            try:
+                job = self._vlm_q.get(timeout=0.2)
+            except Exception:
+                continue
+
+            img_for_vlm, json_path, pose, img_basename = job
+            try:
+                t0 = time.time()
+                self.get_logger().info(f"[vlm] POST {self.vlm_endpoint}  image_path={img_for_vlm}")
+                caption = _call_vlm(self.vlm_endpoint, img_for_vlm, timeout=self.vlm_timeout, retries=self.vlm_retries)
+                self.get_logger().warn(f"[vlm] took {time.time() - t0:.2f}s")
+
+                _update_sidecar_json(json_path, pose, img_basename, vlm_text=caption)
+                if not caption:
+                    self.get_logger().warn("[vlm] no caption returned")
+            except Exception as e:
+                self.get_logger().error(f"[vlm] worker failed: {e}")
+            finally:
+                try:
+                    self._vlm_q.task_done()
+                except Exception:
+                    pass
+
+
     # ------------------------------------------------------------------
     # Capture service: save one JPG+JSON (and VLM) from latest messages
     # ------------------------------------------------------------------
-    def sync_frame_and_azimuth(self, img_msg: Image, azimuth_msg: PointStamped):
+    def image_cb(self, img_msg: Image):
         try:
+
             # Check approximate sync
             t_img = _stamp_to_sec(img_msg.header.stamp)
             t_state = _stamp_to_sec(self.last_state_msg.header.stamp)
+            stamp_tup = (img_msg.header.stamp.sec, img_msg.header.stamp.nanosec)
+
+            if stamp_tup == self._last_img_stamp:
+                self._same_frame_hits += 1
+                if (self._same_frame_hits % self._freeze_warn_every) == 0:
+                    self.get_logger().warn(
+                        f"Frozen/repeated frame detected (same stamp) hits={self._same_frame_hits}. Skipping.")
+                return
+
             dt = abs(t_img - t_state)
             if dt > self.sync_slop:
-                self.get_logger().info(
-                    f"Capture with unsynced pair: |t_img - t_state| = {dt:.3f}s "
-                    f"(slop={self.sync_slop:.3f}s)"
-                )
+                # self.get_logger().info(
+                #     f"Capture with unsynced pair: |t_img - t_state| = {dt:.3f}s "
+                #     f"(slop={self.sync_slop:.3f}s)"
+                # )
                 pose = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
             else:
                 state_msg = self.last_state_msg
-                pose = self.extract_pose_from_state(state_msg)
+                pose = ImageStateBuffer.extract_pose_from_state(state_msg)
 
             cv_img = self.bridge.imgmsg_to_cv2(img_msg, desired_encoding="bgr8")
+
+
+
         except Exception as e:
             msg = f"Failed to convert image: {e}"
             self.get_logger().error(msg)
             return
-
+        unique_out_dir, azimuth = ImageStateBuffer.parse_frame_id(img_msg.header.frame_id)
         # Optionally override yaw with AprilTag azimuth if available
-        pose["yaw"] = round(azimuth_msg.point.x, 5)
+        if azimuth is not None:
+            pose["yaw"] = round(azimuth, 5)
 
         # Use image ROS time for filename
         stamp = img_msg.header.stamp
         t_sec = _stamp_to_sec(stamp)
         ts_str = time.strftime("%Y%m%d_%H%M%S", time.localtime(t_sec))
         base_name = f"{self.drone_id}_{ts_str}"
-        unique_out_dir: str = azimuth_msg.header.frame_id
-        self.out_dir = os.path.join(self.base_dir, unique_out_dir)
+        self.out_dir = os.path.join(self.base_dir, str(unique_out_dir))
         jpg_path = os.path.join(self.out_dir, base_name + ".jpg")
         json_path = os.path.join(self.out_dir, base_name + ".json")
         img_basename = os.path.basename(jpg_path)
@@ -265,6 +300,8 @@ class ImageStateBuffer(Node):
         os.makedirs(self.out_dir, exist_ok=True)
         import cv2
         try:
+            # txt = f"t={stamp.sec}.{stamp.nanosec:09d}"
+            # cv2.putText(cv_img, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             cv2.imwrite(jpg_path, cv_img)
         except Exception as e:
             msg = f"Failed to save image {jpg_path}: {e}"
@@ -272,41 +309,25 @@ class ImageStateBuffer(Node):
 
         # First create/update JSON with pose and image name, no VLM yet
         _update_sidecar_json(json_path, pose, img_basename, vlm_text=None)
-
-        vlm_caption = None
+        self._last_img_stamp = stamp_tup
+        self._same_frame_hits = 0
         if self.vlm_endpoint:
-            # Remap path if needed for the VLM server
-            img_for_vlm = _remap_path(
-                jpg_path,
-                self.vlm_path_src or None,
-                self.vlm_path_dst or None,
-            )
+            img_for_vlm = _remap_path(jpg_path, self.vlm_path_src or None, self.vlm_path_dst or None)
+            job = (img_for_vlm, json_path, dict(pose), img_basename)
+
+            # keep only the latest job
+            try:
+                self._vlm_q.put_nowait(job)
+            except queue.Full:
+                try:
+                    _ = self._vlm_q.get_nowait()  # drop the older pending job
+                except queue.Empty:
+                    pass
+                self._vlm_q.put_nowait(job)
+
             self.get_logger().info(
                 f"[vlm] POST {self.vlm_endpoint}  image_path={img_for_vlm}"
             )
-            vlm_caption = _call_vlm(
-                self.vlm_endpoint,
-                img_for_vlm,
-                timeout=self.vlm_timeout,
-                retries=self.vlm_retries,
-            )
-            if vlm_caption:
-                short = vlm_caption[:120] + ("…" if len(vlm_caption) > 120 else "")
-                self.get_logger().info(f"[vlm] caption: {short}")
-            else:
-                self.get_logger().warn("[vlm] no caption returned")
-
-            _update_sidecar_json(
-                json_path,
-                pose,
-                img_basename,
-                vlm_text=vlm_caption,
-            )
-
-        msg = f"Captured {img_basename} with pose={pose}  dt={dt:.3f}s"
-        if vlm_caption:
-            msg += " (with VLM caption)"
-        self.get_logger().info(msg)
 
     # ------------------------------------------------------------------
     # Cleanup (Subscriptions are destroyed in destroy_node, which is fine)
