@@ -190,6 +190,26 @@ class VideoStreamManager(Node):
         self.last_seen_tag_id = tid
         self.last_seen_tag_stamp = msg.header.stamp if hasattr(msg, "header") else None
 
+    def on_detections(self, msg):
+        if not msg.detections:
+            self.last_seen_tag_id = None
+            self.last_seen_tag_stamp = msg.header.stamp if hasattr(msg, "header") else None
+            return
+
+        det = msg.detections[0]
+
+        tid = None
+        if hasattr(det, "id"):
+            if isinstance(det.id, (list, tuple)):
+                tid = int(det.id[0]) if det.id else None
+            else:
+                tid = int(det.id)
+        elif hasattr(det, "ids"):
+            tid = int(det.ids[0]) if det.ids else None
+
+        self.last_seen_tag_id = tid
+        self.last_seen_tag_stamp = msg.header.stamp if hasattr(msg, "header") else None
+
     def gcs_keep_alive_timer_callback(self):
         msg = Bool()
         msg.data = True
