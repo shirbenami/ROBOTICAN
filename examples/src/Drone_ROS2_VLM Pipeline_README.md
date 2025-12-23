@@ -4,16 +4,12 @@ Minimal instructions to run the whole chain.
 
 ---
 ## Architecture diagram
-![System diagram](helpers/drawio/robotican_vila_pipeline.drawio.png)
+![System diagram](helpers/drawio/demo_with_main.drawio.png)
 
 ## 0. Environment (all machines)
 
 ```bash
-export ROS_DOMAIN_ID=2
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-# Optional, if you use a custom CycloneDDS config:
-# export CYCLONEDDS_URI=file:///etc/cyclonedds.xml     # backend
-# export CYCLONEDDS_URI=file:///etc/cyclonedds/cyclonedds.xml  # jetson
+source ~/rqs_iai_ws/src/ros2_env.sh
 ```
 
 ## 1. Backend Docker – video → /R2/camera/image_raw
@@ -21,40 +17,42 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 In the backend container (it):
 ```bash 
 docker exec -it it bash
-cd rqs_iai_ws
-source /opt/ros/humble/setup.bash
-source install/setup.bash
-cd src/examples/src
-
+source ~/rqs_iai_ws/src/ros2_env.sh
+cd ~/rqs_iai_ws/src/examples/src
+python3 video_stream.py
 ```
 
-Quick check (in same container):
+Test with ros2 env:
+```bash 
+ros2 service call /R2/start_capture std_srvs/srv/Trigger
+```
 ```bash 
 ros2 topic info /R2/camera/image_raw
 ```
 
-## 2. AGX1 – subscribe & call VLM
+## 2. AGX1 – subscribe & save image + azimuth
 On AGX1 (192.168.131.22):
 ```bash 
 ssh user@192.168.131.22
-
-export ROS_DOMAIN_ID=2
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-# export CYCLONEDDS_URI=file:///etc/cyclonedds/cyclonedds.xml
-
-source /opt/ros/humble/setup.bash
+source ~/rqs_iai_ws/src/ros2_env.sh
 cd ~/rqs_iai_ws/src/examples/src
-source ../../../install/setup.bash
-
-python3 image_state_subscriber_call_vlm.py \
-  --out-dir /home/user/jetson-containers/data/R2 \
-  --vlm http://192.168.131.22:8080/describe
-
+python3 image_azimuth_subscriber.py --out-dir /home/user/jetson-containers/data/R2
 ```
-This node handles /R2/start_capture, /R2/frame_capture, /R2/stop_capture
-and writes JPG + JSON with VLM text
 
-## 3. Path runner + periodic capture
+Test:
+Check for new subfolder in /home/user/jetson-containers/data/R2 with images and JSON.
+
+## 3. AGX1 – VLM Folder Watch
+```bash 
+ssh -X user@192.168.131.22
+source ~/rqs_iai_ws/src/ros2_env.sh
+cd ~/rqs_iai_ws/src/examples/src
+python3 vlm_backfill_latest_updated.py \
+  --base-dir /home/user/jetson-containers/data/R2 \
+  --endpoint http://192.168.131.22:8080/describe \
+  --watch --recent-seconds 60 --watch-interval 2
+```
+## 4. Main – move drone and trigger captures
 
 Back on backend (same it container as step 1):
 * flight-mode: 1 ROLL, 2 FLIGHT
@@ -62,14 +60,20 @@ Back on backend (same it container as step 1):
 docker exec -it it bash
 
 cd rqs_iai_ws
-source /opt/ros/humble/setup.bash
-source install/setup.bash
+source ~/rqs_iai_ws/src/ros2_env.sh
 cd src/examples/src
-
-
-python3 main_run_path_and_capture.py \
-  --rooster-id R2 \
-  --flight-mode 1 \
-  --path mamad_path_1.txt \
-  --capture-period 1.0
+python3 main_run_path_and_capture.py --path roll_custom_path.txt
 ```
+
+## Test Checklist
+* Backend video node:
+  * ros2 topic echo /R2/camera/image_raw (should show images)
+
+* Image/azimuth subscriber:
+  * Check output folder for timestamped images/JSON files.
+
+* VLM:
+  * Confirm JSON files are updated with captions.
+
+* Main movement:
+  * Drone should move and trigger captures; images should save automatically

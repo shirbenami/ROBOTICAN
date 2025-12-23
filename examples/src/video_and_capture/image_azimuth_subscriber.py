@@ -240,7 +240,7 @@ def main():
     parser.add_argument(
         "--out-dir",
         required=True,
-        default="/tmp/captures/",
+        default="/home/user/jetson-containers/data/R2",
         help="Output directory for jpg+json pairs",
     )
     parser.add_argument(
