@@ -49,7 +49,8 @@ class VideoStreamManager(Node):
         self.stream_timeout_s = 1.5
 
         self.last_pub_time = self.get_clock().now()  # in seconds, wall-clock time
-        self.pub_period = Duration(seconds=0.5)  # seconds between publishes
+        self.pub_period = Duration(seconds=3.0)  # seconds between publishes
+        self.last_tf_tag_time = self.get_clock().now()
 
         self.capturing_enabled = False
         self.camera_info_template = None
@@ -60,7 +61,7 @@ class VideoStreamManager(Node):
 
         self.latest_frame = None
         self.latest_lock = threading.Lock()
-        self.pub_timer = self.create_timer(1.0, self.on_pub_timer)
+        self.pub_timer = self.create_timer(4.0, self.on_pub_timer)
 
         # cv_bridge for publishing
         self.bridge = CvBridge()
@@ -93,6 +94,7 @@ class VideoStreamManager(Node):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
+
         # --- Publisher ---
         self.image_pub = self.create_publisher(
             Image, image_raw_topic, qos_profile_sensor_data
@@ -105,8 +107,6 @@ class VideoStreamManager(Node):
         # --- Services
         self.create_service(Trigger, f"/{self.id}/start_capture", self.handle_start_capture)
         self.create_service(Trigger, f"/{self.id}/stop_capture", self.handle_stop_capture)
-
-
 
 
         # Azimuth Parameters
@@ -350,8 +350,10 @@ class VideoStreamManager(Node):
 
         self.image_pub.publish(msg)
         self.camera_info_pub.publish(ci)
+        self.last_pub_time = now
 
-        last_yaw_deg, tag_id = self.get_camera_yaw(query_time=rclpy.time.Time())
+
+        last_yaw_deg, tag_id = self.get_camera_yaw(query_time=msg.header.stamp)
         # azimuth_value_msg = Point()
         # azimuth_msg = PointStamped()
         #
@@ -373,8 +375,9 @@ class VideoStreamManager(Node):
         if last_yaw_deg is None:
             self.get_logger().warn(f"Failed to get camera yaw from tag_id = {tag_id}")
             return
-        msg.header.frame_id = self.dir_name +'_____' + str(last_yaw_deg)
-        self.image_used_pub.publish(msg)
+        msg_used = copy.deepcopy(msg)
+        msg_used.header.frame_id = f"{self.dir_name}_____{last_yaw_deg:.5f}"
+        self.image_used_pub.publish(msg_used)
         # self.azimuth_pub.publish(azimuth_msg)
 
         # CameraInfo creation:
@@ -472,13 +475,17 @@ class VideoStreamManager(Node):
         """
         last_error = None
         best_tag_yaw_deg = None
+        best_tag_yaw_rad = None
         best_tag_id = None
+
+        print(f"Known tag IDs: {self.known_tag_ids}")
 
         min_abs_relative_yaw = float("inf")
 
         # Use image stamp if available; otherwise fallback to "latest"
 
         for tid in self.known_tag_ids:
+            print(f"\n-- Checking tag ID {tid} --")
             # SAME candidate frame naming as your old code (no changes)
             candidate_frames = [
                 f"tag{self.tag_family}:{tid}",
@@ -505,10 +512,11 @@ class VideoStreamManager(Node):
 
             if transform:
                 t = transform.transform.translation
+                print(f"  Translation: x={t.x:.3f}, y={t.y:.3f}, z={t.z:.3f}")
 
                 relative_yaw_rad = math.atan2(-t.x, t.z)
                 relative_yaw_deg = math.degrees(relative_yaw_rad)
-
+                print(f"  Relative yaw: {relative_yaw_deg:.2f} deg")
                 abs_relative_yaw = abs(relative_yaw_deg)
 
                 if abs_relative_yaw < min_abs_relative_yaw:
@@ -518,13 +526,22 @@ class VideoStreamManager(Node):
 
                     camera_yaw = wall_azimuth_deg + relative_yaw_deg
                     camera_yaw = camera_yaw % 360.0
-
+                    # try:
+                    #     camera_yaw_rad = math.radians(camera_yaw)
+                    # except Exception as exp:
+                    #     self.get_logger().warn(f"Error with converting to Radians: {exp}")
+                    #     camera_yaw_rad = None
+                    # # best_tag_yaw_rad = camera_yaw_rad
                     best_tag_yaw_deg = camera_yaw
                     best_tag_id = tid
 
         if best_tag_yaw_deg is not None:
+            print("\n=== RESULT ===")
+            print(f"Best tag ID: {best_tag_id}")
+            print(f"Camera yaw: {best_tag_yaw_deg:.2f} deg")
             return best_tag_yaw_deg, best_tag_id
 
+        print("No valid tag found")
         return None, last_error
 
     # ---------- cleanup ----------
