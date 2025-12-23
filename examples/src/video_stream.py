@@ -118,6 +118,9 @@ class VideoStreamManager(Node):
         }
         self.tag_family = "36h11"
         self.known_tag_ids = list(self.tag_config.keys())
+        self.last_seen_tag_id = None
+        self.last_seen_tag_stamp = None
+
 
         # ---- GStreamer pipeline with appsink ----
         gst_pipeline = (
@@ -166,6 +169,26 @@ class VideoStreamManager(Node):
         self.max_captures = 20
 
     # ---------- ROS2 timers ----------
+
+    def on_detections(self, msg):
+        if not msg.detections:
+            self.last_seen_tag_id = None
+            self.last_seen_tag_stamp = msg.header.stamp if hasattr(msg, "header") else None
+            return
+
+        det = msg.detections[0]
+
+        tid = None
+        if hasattr(det, "id"):
+            if isinstance(det.id, (list, tuple)):
+                tid = int(det.id[0]) if det.id else None
+            else:
+                tid = int(det.id)
+        elif hasattr(det, "ids"):
+            tid = int(det.ids[0]) if det.ids else None
+
+        self.last_seen_tag_id = tid
+        self.last_seen_tag_stamp = msg.header.stamp if hasattr(msg, "header") else None
 
     def gcs_keep_alive_timer_callback(self):
         msg = Bool()
@@ -464,28 +487,17 @@ class VideoStreamManager(Node):
     # Core azimuth computation
     # -------------------------------------------------------------------------
     def get_camera_yaw(self, query_time):
-        """
-        Same API/name as your original code.
-
-        NEW:
-        - If we have an image stamp, we try lookup_transform using that stamp
-          to align azimuth to the latest frame.
-        - If no image received yet, falls back to latest TF (Time()).
-        """
         last_error = None
         best_tag_yaw_deg = None
-        best_tag_yaw_rad = None
         best_tag_id = None
+
+        newest_tf_time = None
 
         print(f"Known tag IDs: {self.known_tag_ids}")
 
-        min_abs_relative_yaw = float("inf")
-
-        # Use image stamp if available; otherwise fallback to "latest"
-
         for tid in self.known_tag_ids:
             print(f"\n-- Checking tag ID {tid} --")
-            # SAME candidate frame naming as your old code (no changes)
+
             candidate_frames = [
                 f"tag{self.tag_family}:{tid}",
                 f"tag_{tid}",
@@ -493,50 +505,47 @@ class VideoStreamManager(Node):
             ]
 
             transform = None
-
             for tag_frame in candidate_frames:
                 try:
-
                     transform = self.tf_buffer.lookup_transform(
                         self.camera_frame,
                         tag_frame,
                         query_time,
                         timeout=rclpy.duration.Duration(seconds=0.05)
                     )
-
                     break
                 except TransformException as e:
                     last_error = e
                     continue
 
-            if transform:
-                t = transform.transform.translation
-                print(f"  Translation: x={t.x:.3f}, y={t.y:.3f}, z={t.z:.3f}")
+            if not transform:
+                continue
 
-                relative_yaw_rad = math.atan2(-t.x, t.z)
-                relative_yaw_deg = math.degrees(relative_yaw_rad)
-                print(f"  Relative yaw: {relative_yaw_deg:.2f} deg")
-                abs_relative_yaw = abs(relative_yaw_deg)
+            tf_stamp = transform.header.stamp
+            tf_time = rclpy.time.Time.from_msg(tf_stamp)
 
-                if abs_relative_yaw < min_abs_relative_yaw:
-                    min_abs_relative_yaw = abs_relative_yaw
+            if newest_tf_time is not None and tf_time <= newest_tf_time:
+                continue
 
-                    wall_azimuth_deg = self.tag_config[tid]
+            newest_tf_time = tf_time
 
-                    camera_yaw = wall_azimuth_deg + relative_yaw_deg
-                    camera_yaw = camera_yaw % 360.0
-                    # try:
-                    #     camera_yaw_rad = math.radians(camera_yaw)
-                    # except Exception as exp:
-                    #     self.get_logger().warn(f"Error with converting to Radians: {exp}")
-                    #     camera_yaw_rad = None
-                    # # best_tag_yaw_rad = camera_yaw_rad
-                    best_tag_yaw_deg = camera_yaw
-                    best_tag_id = tid
+            t = transform.transform.translation
+            print(f"  Translation: x={t.x:.3f}, y={t.y:.3f}, z={t.z:.3f}")
+            print(f"  TF stamp: {tf_time.nanoseconds}")
+
+            relative_yaw_rad = math.atan2(-t.x, t.z)
+            relative_yaw_deg = math.degrees(relative_yaw_rad)
+            print(f"  Relative yaw: {relative_yaw_deg:.2f} deg")
+
+            wall_azimuth_deg = self.tag_config[tid]
+            camera_yaw = (wall_azimuth_deg + relative_yaw_deg) % 360.0
+
+            best_tag_yaw_deg = camera_yaw
+            best_tag_id = tid
 
         if best_tag_yaw_deg is not None:
             print("\n=== RESULT ===")
-            print(f"Best tag ID: {best_tag_id}")
+            print(f"Selected (newest TF) tag ID: {best_tag_id}")
             print(f"Camera yaw: {best_tag_yaw_deg:.2f} deg")
             return best_tag_yaw_deg, best_tag_id
 
@@ -555,7 +564,7 @@ class VideoStreamManager(Node):
 def main(args=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--drone-id", default="R2", help="Drone ID (R1/R2/R3...)")
-    parser.add_argument("--host-ip", default="192.168.131.22", help="Host IP for UDP video sink")
+    parser.add_argument("--host-ip", default="192.168.131.24", help="Host IP for UDP video sink")
     parser.add_argument("--port", type=int, default=5001, help="UDP port for video stream")
     parser.add_argument("--width", type=int, default=640, help="Image width in pixels")
     parsed = parser.parse_args()
