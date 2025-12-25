@@ -1,6 +1,15 @@
 # Drone → ROS2 → VLM Pipeline
 
-Minimal instructions to run the whole chain.
+Minimal instructions to run the Robotican section.
+
+#### Robotican Section Setup
+* Drone: ON (Preferably R2)
+* COMM Unit: ON and connected
+
+#### Workflow
+* Capture Mode: video_stream.py ➔ main_run_path_and_capture.py ➔ vlm_backfill_latest.py (after movement).
+* Direct Mode: Use vlm_backfill_latest.py for processing existing image folders.
+
 
 ---
 ## Architecture diagram
