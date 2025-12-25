@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 import argparse
+import datetime
 import json
 import os
+import shutil
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Tuple
 
 import requests
@@ -191,6 +194,7 @@ def call_vlm(endpoint: str, image_path: str, timeout_s: float, retries: int, ret
 
 def process_folder(
     folder: str,
+    new_folder: str,
     endpoint: str,
     path_src: Optional[str],
     path_dst: Optional[str],
@@ -208,21 +212,38 @@ def process_folder(
     if not jpgs:
         log(f"[worker] No JPGs found in: {folder}")
         return (0, 0, 0)
-
+    print(jpgs)
     done = skipped = failed = 0
+    new_folder_path = Path(new_folder)
+    new_folder_path.mkdir(parents=True, exist_ok=True)
 
     for jpg in jpgs:
-        jpg_path = os.path.join(folder, jpg)
+        jpg_path = Path(folder) / jpg
+        shutil.copy(jpg_path, Path(new_folder))
+        jpg_path = new_folder_path / jpg
         base = os.path.splitext(jpg)[0]
         json_path = os.path.join(folder, base + ".json")
-
         js = load_json(json_path)
+        json_path = new_folder_path / f"{base}.json"
 
+
+        new_js = {}
+        pose = js.get("pose")
+        new_js.setdefault("pose", pose)
+        new_js.setdefault("image", os.path.basename(str(jpg_path)))
+
+
+        # tmp = json_path + ".tmp"
+        with open(json_path, "w") as f:
+            print(f)
+            json.dump(new_js, f, indent=2)
+        # os.replace(tmp, new_json_path)
+        print("finished dump")
         if (not force) and already_captioned(js):
             skipped += 1
             continue
 
-        img_for_vlm = remap_path(jpg_path, path_src, path_dst)
+        img_for_vlm = remap_path(str(jpg_path), path_src, path_dst)
         log(f"[vlm] POST {endpoint}  image_path={img_for_vlm}")
 
         t0 = time.time()
@@ -247,21 +268,21 @@ def process_folder(
                 "response": response,
             })
 
-        # Optional: keep status block (handy for debugging)
-        js["vlm"] = {
-            "status": "done" if res.ok else "failed",
-            "endpoint": endpoint,
-            "image_path_sent": img_for_vlm,
-            "took_s": round(dt, 3),
-            "error": None if res.ok else res.error,
-            "updated_at_unix": time.time(),
-        }
-
-        # Optional: remove/stop using vlm_text to avoid confusion
-        if "vlm_text" in js:
-            js.pop("vlm_text", None)
-
-        save_json(json_path, js)
+        # # Optional: keep status block (handy for debugging)
+        # js["vlm"] = {
+        #     "status": "done" if res.ok else "failed",
+        #     "endpoint": endpoint,
+        #     "image_path_sent": img_for_vlm,
+        #     "took_s": round(dt, 3),
+        #     "error": None if res.ok else res.error,
+        #     "updated_at_unix": time.time(),
+        # }
+        #
+        # # Optional: remove/stop using vlm_text to avoid confusion
+        # if "vlm_text" in js:
+        #     js.pop("vlm_text", None)
+        #
+        # save_json(str(json_path), js)
 
         if res.ok:
             done += 1
@@ -299,10 +320,16 @@ def main():
         sys.exit(2)
 
     def run_once():
-        latest = pick_latest_subdir(args.base_dir, args.latest_by)
+        latest = Path(pick_latest_subdir(args.base_dir, args.latest_by))
+        parent= latest.parent
+        new_folder_name = datetime.datetime.now().strftime("%Y_%m_%d___%H_%M_%S")
+        new_file_path = Path(parent / new_folder_name)
+
+
         log(f"[worker] Latest folder: {latest}")
         done, skipped, failed = process_folder(
-            folder=latest,
+            folder=latest.as_posix(),
+            new_folder=new_file_path.as_posix(),
             endpoint=args.endpoint,
             path_src=args.path_src,
             path_dst=args.path_dst,

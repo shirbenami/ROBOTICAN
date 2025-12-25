@@ -10,8 +10,10 @@ from rclpy.client import Client
 from rclpy.duration import Duration
 
 from video_handler_interfaces.srv import SetVideoMode
+from fcu_driver_interfaces.msg import UAVState
 from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
+
 
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import Point, PointStamped
@@ -46,10 +48,10 @@ class VideoStreamManager(Node):
         self.height = int(self.width * 9 / 16)
         self.host = host_ip    # host IP "192.168.131.24" Laptop
         self.port = port
-        self.stream_timeout_s = 1.5
+        self.stream_timeout_s = 0.1
 
         self.last_pub_time = self.get_clock().now()  # in seconds, wall-clock time
-        self.pub_period = Duration(seconds=3.0)  # seconds between publishes
+        self.pub_period = Duration(seconds=0.1)  # seconds between publishes
         self.last_tf_tag_time = self.get_clock().now()
 
         self.capturing_enabled = False
@@ -61,7 +63,7 @@ class VideoStreamManager(Node):
 
         self.latest_frame = None
         self.latest_lock = threading.Lock()
-        self.pub_timer = self.create_timer(4.0, self.on_pub_timer)
+        self.pub_timer = self.create_timer(1.0, self.on_pub_timer)
 
         # cv_bridge for publishing
         self.bridge = CvBridge()
@@ -108,14 +110,31 @@ class VideoStreamManager(Node):
         self.create_service(Trigger, f"/{self.id}/start_capture", self.handle_start_capture)
         self.create_service(Trigger, f"/{self.id}/stop_capture", self.handle_stop_capture)
 
+        # --- Subscriber
+        # subscriber to FCU state
+        self.state_sub = self.create_subscription(
+            UAVState,
+            f"/{self.id}/fcu/state",
+            self.state_callback,
+            qos_profile_sensor_data,
+        )
+
+        self.yaw_rad_lock = threading.Lock()
+        self.yaw_rad = None
 
         # Azimuth Parameters
         self.tag_config = {
-            10: 0.0,  # North
-            11: 90.0,  # East
-            12: 180.0,  # South
-            13: 270.0,  # West
+            10: 90.0,  # North Fridge
+            11: 0.0,  # East Window
+            12: 270.0,  # South Desk
+            13: 180.0,  # West Door
         }
+        # self.tag_config = {
+        #     10: 0.0,  # North
+        #     11: 90.0,  # East
+        #     12: 180.0,  # South
+        #     13: 270.0,  # West
+        # }
         self.tag_family = "36h11"
         self.known_tag_ids = list(self.tag_config.keys())
         self.last_seen_tag_id = None
@@ -169,26 +188,16 @@ class VideoStreamManager(Node):
         self.max_captures = 20
 
     # ---------- ROS2 timers ----------
-    #TODO: who is calling on detection??
-    def on_detections(self, msg):
-        if not msg.detections:
-            self.last_seen_tag_id = None
-            self.last_seen_tag_stamp = msg.header.stamp if hasattr(msg, "header") else None
+
+    def state_callback(self, msg: UAVState):
+        try:
+            with self.yaw_rad_lock:
+                self.yaw_rad = msg.azimuth
+        except AttributeError:
+            self.get_logger().error(
+                "UAVState has no field 'azimuth'. Update state_callback() to use the correct field."
+            )
             return
-
-        det = msg.detections[0]
-
-        tid = None
-        if hasattr(det, "id"):
-            if isinstance(det.id, (list, tuple)):
-                tid = int(det.id[0]) if det.id else None
-            else:
-                tid = int(det.id)
-        elif hasattr(det, "ids"):
-            tid = int(det.ids[0]) if det.ids else None
-
-        self.last_seen_tag_id = tid
-        self.last_seen_tag_stamp = msg.header.stamp if hasattr(msg, "header") else None
 
     def gcs_keep_alive_timer_callback(self):
         msg = Bool()
@@ -320,17 +329,21 @@ class VideoStreamManager(Node):
     def on_pub_timer(self):
         if not self.capturing_enabled:
             return
-        if self.last_sample_time is None:
-            return
+        # if self.last_sample_time is None:
+        #     self.get_logger().info("No capture time")
+        #     return
         if (time.monotonic() - self.last_sample_time) > self.stream_timeout_s:
             self.get_logger().warn("Stream stale (no UDP frames). Not publishing.")
             return
-        with self.latest_lock:
-            if self.latest_frame is None:
-                return
+        # with self.latest_lock:
+        #     if self.latest_frame is None:
+        #         self.get_logger().warn("Stream stale (no UDP frames)")
+        #         return
             frame = self.latest_frame.copy()
+        frame = self.latest_frame.copy()
 
         now = self.get_clock().now()
+        self.get_logger().info(f"Working on frame with timestamp: {now}")
         self.process_frame(frame, now)  # TF lookup is here (safe)
 
     def process_frame(self, frame: np.ndarray, now):
@@ -373,32 +386,37 @@ class VideoStreamManager(Node):
 
         self.image_pub.publish(msg)
         self.camera_info_pub.publish(ci)
-        self.last_pub_time = now
+        # with self.yaw_rad_lock:
+        #     last_yaw_rad = -self.yaw_rad
+        # self.last_pub_time = now
 
-        last_yaw_deg, tag_id = self.get_camera_yaw(query_time=rclpy.time.Time())
-        # azimuth_value_msg = Point()
-        # azimuth_msg = PointStamped()
-        #
-        # # Build azimuth msg ALWAYS stamped
-        # azimuth_msg.header.stamp = stamp_msg
-        # azimuth_msg.header.frame_id = self.dir_name  # keep this always
-        # if last_yaw_deg is None:
-        #     self.get_logger().warn(
-        #         f"No tags visible. Last TF error: {tag_id}")
-        #     azimuth_msg.point.x = float("nan")  # or -999.0
-        #     azimuth_msg.point.y = -1.0  # tag_id sentinel
-        #
-        # else:
-        #     azimuth_value_msg.x = float(last_yaw_deg)
-        #     azimuth_value_msg.y = float(tag_id)
-        #     azimuth_msg.point = azimuth_value_msg
-        #     self.get_logger().info(
-        #         f"Azimuth: {last_yaw_deg:.1f}° (Based on Tag {tag_id})")
-        if last_yaw_deg is None:
+        last_yaw_rad, tag_id = self.get_camera_yaw(query_time=rclpy.time.Time())
+        # # azimuth_value_msg = Point()
+        # # azimuth_msg = PointStamped()
+        # #
+        # # # Build azimuth msg ALWAYS stamped
+        # # azimuth_msg.header.stamp = stamp_msg
+        # # azimuth_msg.header.frame_id = self.dir_name  # keep this always
+        # # if last_yaw_deg is None:
+        # #     self.get_logger().warn(
+        # #         f"No tags visible. Last TF error: {tag_id}")
+        # #     azimuth_msg.point.x = float("nan")  # or -999.0
+        # #     azimuth_msg.point.y = -1.0  # tag_id sentinel
+        # #
+        # # else:
+        # #     azimuth_value_msg.x = float(last_yaw_deg)
+        # #     azimuth_value_msg.y = float(tag_id)
+        # #     azimuth_msg.point = azimuth_value_msg
+        # #     self.get_logger().info(
+        # #         f"Azimuth: {last_yaw_deg:.1f}° (Based on Tag {tag_id})")
+        if last_yaw_rad is None:
             self.get_logger().warn(f"Failed to get camera yaw from tag_id = {tag_id}")
-            return
+            last_yaw_rad = 3.14
+            #return
+
+
         msg_used = copy.deepcopy(msg)
-        msg_used.header.frame_id = f"{self.dir_name}_____{last_yaw_deg:.5f}"
+        msg_used.header.frame_id = f"{self.dir_name}_____{last_yaw_rad:.5f}"
         self.image_used_pub.publish(msg_used)
         # self.azimuth_pub.publish(azimuth_msg)
 
@@ -489,6 +507,7 @@ class VideoStreamManager(Node):
     def get_camera_yaw(self, query_time):
         last_error = None
         best_tag_yaw_deg = None
+        best_tag_yaw_rad = None
         best_tag_id = None
 
         newest_tf_time = None
@@ -541,13 +560,15 @@ class VideoStreamManager(Node):
             camera_yaw = (wall_azimuth_deg + relative_yaw_deg) % 360.0
 
             best_tag_yaw_deg = camera_yaw
+            best_tag_yaw_rad = math.radians(camera_yaw)
             best_tag_id = tid
 
         if best_tag_yaw_deg is not None:
             print("\n=== RESULT ===")
             print(f"Selected (newest TF) tag ID: {best_tag_id}")
-            print(f"Camera yaw: {best_tag_yaw_deg:.2f} deg")
-            return best_tag_yaw_deg, best_tag_id
+            print(f"Radians Camera yaw: {best_tag_yaw_rad:.2f} rad")
+            print(f"Degrees Camera yaw: {best_tag_yaw_deg:.2f} deg")
+            return best_tag_yaw_rad, best_tag_id
 
         print("No valid tag found")
         return None, last_error

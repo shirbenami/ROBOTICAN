@@ -192,8 +192,16 @@ class ImageStateBuffer(Node):
         # Use image ROS time for filename
         stamp = img_msg.header.stamp
         t_sec = _stamp_to_sec(stamp)
+
+        # 1. Get the 0.1s digit (the first decimal place)
+        # We use % 1 to get the decimal part, then * 10 to make it a whole number
+        decisec = int(round((t_sec % 1), 1) * 10) % 10
+
+        # 2. Format the time string and append the decisecond
         ts_str = time.strftime("%Y%m%d_%H%M%S", time.localtime(t_sec))
-        base_name = f"{self.drone_id}_{ts_str}"
+        base_name = f"{self.drone_id}_{ts_str}"  # Result: R2_20251224_142736_1
+
+        # 3. Define paths
         self.out_dir = os.path.join(self.base_dir, str(unique_out_dir))
         jpg_path = os.path.join(self.out_dir, base_name + ".jpg")
         json_path = os.path.join(self.out_dir, base_name + ".json")

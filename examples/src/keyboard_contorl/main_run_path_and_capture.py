@@ -218,6 +218,7 @@ class PathRunnerNode(Node):
         last_keep_alive = time.time()
         last_manual = time.time()
 
+
         for name, x, y, z, r, dur in segments:
             if not rclpy.ok():
                 break
@@ -255,10 +256,33 @@ class PathRunnerNode(Node):
                 rclpy.spin_once(self, timeout_sec=0.01)
                 time.sleep(0.02)
 
+            if name == 'A':
+                pass
+
         # Zero at the end
         self.get_logger().info("Path finished, zeroing axes.")
         self.command_model.reset_axes()
         self.call_service_capture(service_client=self.stop_capture_client)
+        self.get_logger().info(f"{self.rooster_id}: calling force_arm=False")
+        req = SetBool.Request()
+        req.data = False
+        future = self.force_arm_client.call_async(req)
+        # 3) Wait for response
+        end_time = time.time() + 5.0
+        while rclpy.ok() and not future.done() and time.time() < end_time:
+            rclpy.spin_once(self, timeout_sec=0.05)
+
+        if not future.done():
+            self.get_logger().error("force_arm timed out")
+            return False
+
+        resp = future.result()
+        self.get_logger().info(
+            f"{self.rooster_id}: force_arm response: success={resp.success}, msg='{resp.message}'"
+        )
+        if not resp.success:
+            return False
+
         for _ in range(20):
             self._send_manual()
             if time.time() - last_keep_alive > 1.0:
