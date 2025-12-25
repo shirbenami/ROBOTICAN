@@ -6,14 +6,3 @@ C 0 0 220 -600 5
 # D 0 0 250 -800 4
 # E 0 0 200 -100 1
 F 0 0 10 0 1
-
-#TODO: review before push
-
-# Example:
-# name x y z r duration_sec
-A 0 0 80 0 5
-B 0 0 220 -700 12
-C 0 0 220 -700 8
-# D 0 0 260 900 10
-#E 0 0 200 600 7
-F 0 0 10 0 1
