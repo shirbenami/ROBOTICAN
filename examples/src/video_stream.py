@@ -16,7 +16,6 @@ from std_srvs.srv import Trigger
 
 
 from sensor_msgs.msg import Image, CameraInfo
-from geometry_msgs.msg import Point, PointStamped
 from builtin_interfaces.msg import Time
 from rclpy.qos import QoSProfile, qos_profile_sensor_data
 

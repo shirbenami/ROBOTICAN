@@ -47,10 +47,8 @@ Check for new subfolder in /home/user/jetson-containers/data/R2 with images and 
 ssh -X user@192.168.131.22
 source ~/rqs_iai_ws/src/ros2_env.sh
 cd ~/rqs_iai_ws/src/examples/src
-python3 vlm_backfill_latest_updated.py \
-  --base-dir /home/user/jetson-containers/data/R2 \
-  --endpoint http://192.168.131.22:8080/describe \
-  --watch --recent-seconds 60 --watch-interval 2
+python3 vlm_backfill_latest.py   --base-dir /home/user/jetson-containers/data/R2   --endpoint http://192.168.131.22:8080/describe    --watch-interval 5.0 --sleep-between 20 --timeout 60
+
 ```
 ## 4. Main – move drone and trigger captures
 
@@ -61,8 +59,8 @@ docker exec -it it bash
 
 cd rqs_iai_ws
 source ~/rqs_iai_ws/src/ros2_env.sh
-cd src/examples/src
-python3 main_run_path_and_capture.py --path roll_custom_path.txt
+cd src/examples/src/keyboard_control
+python3 main_run_path_and_capture.py --path txt/roll_custom_path.txt
 ```
 
 ## Test Checklist
