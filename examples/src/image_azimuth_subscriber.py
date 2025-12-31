@@ -208,6 +208,16 @@ class ImageStateBuffer(Node):
         img_basename = os.path.basename(jpg_path)
 
         os.makedirs(self.out_dir, exist_ok=True)
+
+        # Update 'latest' symbolic link
+        latest_link = os.path.join(self.base_dir, "latest")
+        try:
+            if os.path.lexists(latest_link):
+                os.remove(latest_link)
+            os.symlink(self.out_dir, latest_link)
+        except Exception as e:
+            self.get_logger().error(f"Failed to create symlink {latest_link}: {e}")
+
         import cv2
         try:
             # txt = f"t={stamp.sec}.{stamp.nanosec:09d}"
