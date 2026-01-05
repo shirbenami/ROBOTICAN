@@ -46,7 +46,7 @@ class StateToTFAndPose(Node):
         self.base_frame = self.declare_parameter("base_frame", "base_link").value
 
         # Pose topic that your map builder subscribes to
-        self.pose_topic = self.declare_parameter("pose_topic", "/robot_R1/robot_pose_slam").value
+        self.pose_topic = self.declare_parameter("pose_topic", "/R1/robot_pose_slam").value
 
         # yaw_mode options:
         #   - "pi2_minus_azimuth" (default, common if x=East, y=North)

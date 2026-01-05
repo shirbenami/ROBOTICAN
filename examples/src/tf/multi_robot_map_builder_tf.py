@@ -52,14 +52,14 @@ class OccupancyGridBuilderTF(Node):
         # Frames / topics
         self.map_frame = self.declare_parameter("map_frame", "map").value
         self.cloud_topic = self.declare_parameter("cloud_topic", "/R1/camera/points").value
-        self.pose_topic = self.declare_parameter("pose_topic", "/robot_R1/robot_pose_slam").value
+        self.pose_topic = self.declare_parameter("pose_topic", "/R1/robot_pose_slam").value
 
         self.map_topic = self.declare_parameter("map_topic", "/occupancy_grid").value
         self.map_updates_topic = self.declare_parameter("map_updates_topic", "/occupancy_grid_updates").value
 
         # Grid params
         self.resolution = float(self.declare_parameter("resolution", 0.5).value)  # meters/cell
-        self.grid_size = int(self.declare_parameter("grid_size", 600).value)      # cells (square)
+        self.grid_size = int(self.declare_parameter("grid_size", 1000).value)      # cells (square)
 
         # Map origin: world coords of cell (0,0)
         # If you don't know, set origin_offset big enough so all x/y fall inside.
@@ -68,8 +68,8 @@ class OccupancyGridBuilderTF(Node):
         # Point filtering (after TF transform into map frame)
         self.z_min = float(self.declare_parameter("z_min", -2.0).value)
         self.z_max = float(self.declare_parameter("z_max", 5.0).value)
-        self.r_min = float(self.declare_parameter("range_min", 0.5).value)
-        self.r_max = float(self.declare_parameter("range_max", 80.0).value)
+        self.r_min = float(self.declare_parameter("range_min", 0.1).value)
+        self.r_max = float(self.declare_parameter("range_max", 200.0).value)
 
         # Inflation around hits (cells)
         self.inflation_radius = int(self.declare_parameter("inflation_radius", 1).value)
